@@ -3,7 +3,7 @@ requests
 beautifulsoup4
 textstat
 nltk
+tiktoken
 pandas
 matplotlib
 seaborn
-tiktoken
