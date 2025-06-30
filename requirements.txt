@@ -1,0 +1,9 @@
+streamlit
+requests
+beautifulsoup4
+textstat
+tiktoken
+nltk
+pandas
+matplotlib
+seaborn
