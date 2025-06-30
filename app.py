@@ -14,6 +14,7 @@ import seaborn as sns
 import logging
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 nltk.download('punkt')
@@ -58,7 +59,8 @@ def fetch_url_content(url, selenium_mode=False):
             options.add_argument('--headless')
             options.add_argument('--disable-gpu')
             options.add_argument('--no-sandbox')
-            driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
             driver.get(url)
             html = driver.page_source
             driver.quit()
