@@ -3,26 +3,31 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from textstat import flesch_reading_ease
-from nltk.tokenize import sent_tokenize, word_tokenize
-from nltk.corpus import stopwords
-import nltk
 import json
 import tiktoken
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
+import re
 
-nltk.download('punkt')
-nltk.download('stopwords')
+# === Naive tokenizers to avoid nltk punkt errors ===
+def naive_sent_tokenize(text):
+    return re.split(r'(?<=[.!?]) +', text)
 
-# Configure logging
+def naive_word_tokenize(text):
+    return re.findall(r'\b\w+\b', text.lower())
+
+# === Streamlit App Configuration ===
+st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
+st.title("GenAI Optimization Checker")
+
+# === Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-stop_words = set(stopwords.words('english'))
+# === Constants ===
 tokenizer = tiktoken.get_encoding("cl100k_base")
-
 SEMANTIC_MAP = {
     "section": "Generic Section",
     "article": "Article or Post",
@@ -35,6 +40,7 @@ SEMANTIC_MAP = {
     "blockquote": "Quote or Testimonial"
 }
 
+# === Helpers ===
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -44,18 +50,34 @@ def analyze_readability(text):
     except:
         return 0.0
 
-def parse_html(content):
-    return BeautifulSoup(content, 'html.parser')
+def fetch_url_content(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if 'text/html' not in response.headers.get('Content-Type', ''):
+            st.warning("Unsupported content type")
+            return None
+        return BeautifulSoup(response.content, 'html.parser')
+    except Exception as e:
+        st.error(f"Error fetching URL: {e}")
+        return None
+
+def parse_uploaded_file(uploaded_file):
+    try:
+        content = uploaded_file.read().decode("utf-8")
+        return BeautifulSoup(content, 'html.parser')
+    except Exception as e:
+        st.error(f"Error reading uploaded file: {e}")
+        return None
 
 def extract_chunks(soup):
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
         text = tag.get_text(strip=True)
-        if len(text.split()) > 30:
+        if len(naive_word_tokenize(text)) > 30:
             tokens = count_tokens(text)
             readability = analyze_readability(text)
-            tag_name = tag.name
-            semantic_label = SEMANTIC_MAP.get(tag_name, f"{tag_name.title()} Block")
+            semantic_label = SEMANTIC_MAP.get(tag.name, f"{tag.name.title()} Block")
             chunks.append({
                 'text': text[:300] + '...' if len(text) > 300 else text,
                 'token_count': tokens,
@@ -64,65 +86,42 @@ def extract_chunks(soup):
             })
     return chunks
 
-def extract_internal_links(soup, base_url):
-    base_domain = urlparse(base_url).netloc
-    links = []
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        full_url = urljoin(base_url, href)
-        if urlparse(full_url).netloc == base_domain:
-            anchor_text = a.get_text(strip=True)
-            links.append({
-                'anchor_text': anchor_text,
-                'descriptive': len(anchor_text.split()) > 2,
-                'url': full_url
-            })
-    return links
-
 def extract_basic_entities(text):
-    tokens = word_tokenize(text)
-    return list(set([word for word in tokens if word[0].isupper() and word.lower() not in stop_words and len(word) > 2]))
+    tokens = naive_word_tokenize(text)
+    return list(set([t for t in tokens if t[0].isupper() and len(t) > 2]))
 
-# Streamlit UI
-st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
-st.title("GenAI Optimization Checker")
+# === UI Input Options ===
+st.sidebar.header("Input Options")
+input_type = st.sidebar.radio("Choose input type:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
 
-st.markdown("### Input Options")
-input_type = st.radio("Choose input type:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
-html_content = ""
-base_url = "https://example.com"
-
+soup = None
 if input_type == "Enter URL":
-    url = st.text_input("Enter a URL to analyze:", "https://example.com")
-    if st.button("Fetch URL"):
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=10)
-            html_content = response.text
-            base_url = url
-        except Exception as e:
-            st.error(f"Error fetching URL: {e}")
-
+    url = st.sidebar.text_input("Enter a URL:", "https://example.com")
+    if st.sidebar.button("Fetch from URL"):
+        soup = fetch_url_content(url)
 elif input_type == "Upload HTML File":
-    html_file = st.file_uploader("Upload an HTML file", type="html")
-    if html_file:
-        html_content = html_file.read().decode("utf-8")
-
+    uploaded_file = st.sidebar.file_uploader("Upload an HTML file", type=["html", "htm"])
+    if uploaded_file:
+        soup = parse_uploaded_file(uploaded_file)
 elif input_type == "Paste HTML Code":
-    html_content = st.text_area("Paste HTML code here")
-
+    html_code = st.sidebar.text_area("Paste HTML code here:", height=300)
+    if st.sidebar.button("Analyze HTML"):
+        soup = BeautifulSoup(html_code, 'html.parser')
 elif input_type == "Upload .txt File":
-    txt_file = st.file_uploader("Upload a text file", type="txt")
-    if txt_file:
-        html_content = f"<p>{txt_file.read().decode('utf-8')}</p>"
+    uploaded_txt = st.sidebar.file_uploader("Upload a .txt file", type="txt")
+    if uploaded_txt:
+        try:
+            text = uploaded_txt.read().decode("utf-8")
+            soup = BeautifulSoup(f"<p>{text}</p>", 'html.parser')
+        except Exception as e:
+            st.error(f"Error reading .txt file: {e}")
 
-if html_content:
-    soup = parse_html(html_content)
+if soup:
     chunks = extract_chunks(soup)
     if not chunks:
         st.warning("No significant content chunks found.")
     else:
-        st.subheader("Content Chunks")
+        st.subheader("🧩 Content Chunks Analysis")
         oversized_chunks = 0
         low_readability_chunks = 0
 
@@ -130,20 +129,18 @@ if html_content:
             st.markdown(f"### Chunk {i+1}: {chunk['semantic_role']}")
             st.markdown(f"**Tokens:** {chunk['token_count']}, **Readability:** {chunk['readability']:.2f}")
             st.text(chunk['text'])
-            with st.expander("Entities Detected"):
+
+            with st.expander("Detected Entities"):
                 entities = extract_basic_entities(chunk['text'])
-                if entities:
-                    st.write(entities)
-                else:
-                    st.write("No entities detected.")
+                st.write(entities if entities else "No entities detected.")
 
             if chunk['token_count'] > 300:
                 oversized_chunks += 1
             if chunk['readability'] < 60:
                 low_readability_chunks += 1
 
-        # Visualizations
-        st.subheader("🔍 Chunk Metrics Visualization")
+        # === Visualizations ===
+        st.subheader("📊 Chunk Metrics Visualization")
         df = pd.DataFrame(chunks)
         fig, ax = plt.subplots(figsize=(10, 4))
         sns.histplot(df['token_count'], bins=15, kde=False, ax=ax, color='skyblue')
@@ -159,30 +156,23 @@ if html_content:
         ax2.set_ylabel("Frequency")
         st.pyplot(fig2)
 
-        # Link Analysis
-        internal_links = extract_internal_links(soup, base_url)
-        vague_links = [l for l in internal_links if not l['descriptive']]
-
-        # Recommendations Summary
+        # === Recommendations ===
         st.subheader("🧠 Optimization Summary & Recommendations")
         if oversized_chunks > 0:
-            st.markdown(f"- ✂️ **{oversized_chunks} content chunks exceed 300 tokens**. Consider splitting them.")
+            st.markdown(f"- ✂️ **{oversized_chunks} content chunks exceed 300 tokens**. Consider splitting them for better LLM indexing.")
         if low_readability_chunks > 0:
-            st.markdown(f"- 📉 **{low_readability_chunks} chunks have low readability (<60)**. Simplify language.")
-        if vague_links:
-            st.markdown(f"- 🔗 **{len(vague_links)} internal links use vague anchor text.** Improve them.")
-        if oversized_chunks == 0 and low_readability_chunks == 0 and not vague_links:
-            st.markdown("✅ All content chunks are optimized.")
+            st.markdown(f"- 📉 **{low_readability_chunks} chunks have low readability scores (<60)**. Simplify language for easier LLM understanding.")
+        if oversized_chunks == 0 and low_readability_chunks == 0:
+            st.markdown("✅ All content chunks are well-structured and optimized for LLMs.")
 
         st.markdown("---")
         st.markdown("### 🔧 Further Optimization Suggestions")
-        st.markdown("- Add schema.org markup to improve content structure.")
-        st.markdown("- Include 'robots.txt' and 'llms.txt' allowing AI bots.")
-        st.markdown("- Add author name, update dates, and credential markup.")
-        st.markdown("- Build content clusters and cross-link conceptually.")
-        st.markdown("- Create glossaries, FAQs, and how-to blocks.")
+        st.markdown("- Add schema.org JSON-LD markup to improve semantic clarity.")
+        st.markdown("- Ensure the `robots.txt` and `llms.txt` files do not block AI crawlers.")
+        st.markdown("- Use more descriptive internal link anchor text.")
+        st.markdown("- Cover related entities or topics missing from detected entity set.")
 
-        st.success("Analysis complete. Optimize based on these recommendations.")
+        st.success("Analysis complete. Use this to improve LLM crawlability and visibility.")
 
 st.markdown("---")
-st.caption("Built for GenAI content optimization. Supports multiple input types and AI visibility checks.")
+st.caption("Built for GenAI content optimization. Supports semantic tags and basic entity enrichment.")
