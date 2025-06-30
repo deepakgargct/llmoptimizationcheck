@@ -11,7 +11,6 @@ import tiktoken
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from requests_html import HTMLSession
 import logging
 
 nltk.download('punkt')
@@ -48,14 +47,18 @@ def analyze_readability(text):
     except:
         return 0.0
 
-def fetch_url_with_js(url):
+def fetch_url_content(url):
     try:
-        session = HTMLSession()
-        response = session.get(url)
-        response.html.render(timeout=20)
-        return response.html.html
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' not in content_type:
+            st.warning(f"Unsupported content type: {content_type}")
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return soup
     except Exception as e:
-        st.error(f"JS-rendered fetch failed: {e}")
+        st.error(f"Error fetching URL: {e}")
         return None
 
 def extract_chunks(soup):
@@ -101,9 +104,8 @@ run_button = st.button("Analyze")
 
 if run_button:
     with st.spinner("Fetching and analyzing content..."):
-        html = fetch_url_with_js(url)
-        if html:
-            soup = BeautifulSoup(html, 'html.parser')
+        soup = fetch_url_content(url)
+        if soup:
             chunks = extract_chunks(soup)
             if not chunks:
                 st.warning("No significant content chunks found.")
