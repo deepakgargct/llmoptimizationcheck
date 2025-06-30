@@ -1,9 +1,9 @@
 streamlit
 requests
 beautifulsoup4
-nltk
 textstat
-tiktoken
+nltk
 pandas
 matplotlib
 seaborn
+tiktoken
