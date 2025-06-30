@@ -7,4 +7,3 @@ tiktoken
 pandas
 matplotlib
 seaborn
-requests-html
