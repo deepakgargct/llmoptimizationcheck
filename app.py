@@ -11,23 +11,16 @@ import seaborn as sns
 import logging
 import re
 
-# === Naive tokenizers to avoid nltk punkt errors ===
-def naive_sent_tokenize(text):
-    return re.split(r'(?<=[.!?]) +', text)
-
-def naive_word_tokenize(text):
-    return re.findall(r'\b\w+\b', text.lower())
-
-# === Streamlit App Configuration ===
-st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
-st.title("GenAI Optimization Checker")
-
-# === Logging ===
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# === Constants ===
+# Constants
+DANDELION_TOKEN = "YOUR_DANDELION_API_KEY"  # Replace with your Dandelion API key
+
+# Tokenizer setup
 tokenizer = tiktoken.get_encoding("cl100k_base")
+
 SEMANTIC_MAP = {
     "section": "Generic Section",
     "article": "Article or Post",
@@ -40,7 +33,6 @@ SEMANTIC_MAP = {
     "blockquote": "Quote or Testimonial"
 }
 
-# === Helpers ===
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -54,30 +46,25 @@ def fetch_url_content(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        if 'text/html' not in response.headers.get('Content-Type', ''):
-            st.warning("Unsupported content type")
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' not in content_type:
+            st.warning(f"Unsupported content type: {content_type}")
             return None
-        return BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return soup
     except Exception as e:
         st.error(f"Error fetching URL: {e}")
-        return None
-
-def parse_uploaded_file(uploaded_file):
-    try:
-        content = uploaded_file.read().decode("utf-8")
-        return BeautifulSoup(content, 'html.parser')
-    except Exception as e:
-        st.error(f"Error reading uploaded file: {e}")
         return None
 
 def extract_chunks(soup):
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
         text = tag.get_text(strip=True)
-        if len(naive_word_tokenize(text)) > 30:
+        if len(text.split()) > 30:
             tokens = count_tokens(text)
             readability = analyze_readability(text)
-            semantic_label = SEMANTIC_MAP.get(tag.name, f"{tag.name.title()} Block")
+            tag_name = tag.name
+            semantic_label = SEMANTIC_MAP.get(tag_name, f"{tag_name.title()} Block")
             chunks.append({
                 'text': text[:300] + '...' if len(text) > 300 else text,
                 'token_count': tokens,
@@ -86,42 +73,57 @@ def extract_chunks(soup):
             })
     return chunks
 
-def extract_basic_entities(text):
-    tokens = naive_word_tokenize(text)
-    return list(set([t for t in tokens if t[0].isupper() and len(t) > 2]))
+def extract_entities_dandelion(text):
+    try:
+        url = "https://api.dandelion.eu/datatxt/nex/v1"
+        params = {
+            'text': text,
+            'lang': 'en',
+            'include': 'types,categories,lod',
+            'token': DANDELION_TOKEN
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
+        entities = [ann['spot'] for ann in data.get('annotations', [])]
+        return list(set(entities))
+    except Exception as e:
+        st.error(f"Entity extraction error: {e}")
+        return []
 
-# === UI Input Options ===
-st.sidebar.header("Input Options")
-input_type = st.sidebar.radio("Choose input type:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
+# Streamlit UI
+st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
+st.title("GenAI Optimization Checker")
 
-soup = None
-if input_type == "Enter URL":
-    url = st.sidebar.text_input("Enter a URL:", "https://example.com")
-    if st.sidebar.button("Fetch from URL"):
+input_option = st.radio("Choose input method:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
+content_html = ""
+
+if input_option == "Enter URL":
+    url = st.text_input("Enter a URL to analyze:", "https://example.com")
+    if url and st.button("Analyze"):
         soup = fetch_url_content(url)
-elif input_type == "Upload HTML File":
-    uploaded_file = st.sidebar.file_uploader("Upload an HTML file", type=["html", "htm"])
+        if soup:
+            content_html = str(soup)
+elif input_option == "Upload HTML File":
+    uploaded_file = st.file_uploader("Upload an HTML file:", type=['html'])
     if uploaded_file:
-        soup = parse_uploaded_file(uploaded_file)
-elif input_type == "Paste HTML Code":
-    html_code = st.sidebar.text_area("Paste HTML code here:", height=300)
-    if st.sidebar.button("Analyze HTML"):
-        soup = BeautifulSoup(html_code, 'html.parser')
-elif input_type == "Upload .txt File":
-    uploaded_txt = st.sidebar.file_uploader("Upload a .txt file", type="txt")
-    if uploaded_txt:
-        try:
-            text = uploaded_txt.read().decode("utf-8")
-            soup = BeautifulSoup(f"<p>{text}</p>", 'html.parser')
-        except Exception as e:
-            st.error(f"Error reading .txt file: {e}")
+        content_html = uploaded_file.read().decode("utf-8")
+elif input_option == "Paste HTML Code":
+    pasted_html = st.text_area("Paste HTML content here:")
+    if pasted_html:
+        content_html = pasted_html
+elif input_option == "Upload .txt File":
+    txt_file = st.file_uploader("Upload a .txt file:", type=['txt'])
+    if txt_file:
+        text = txt_file.read().decode("utf-8")
+        content_html = f"<div>{text}</div>"
 
-if soup:
+if content_html:
+    soup = BeautifulSoup(content_html, 'html.parser')
     chunks = extract_chunks(soup)
     if not chunks:
         st.warning("No significant content chunks found.")
     else:
-        st.subheader("🧩 Content Chunks Analysis")
+        st.subheader("Content Chunks")
         oversized_chunks = 0
         low_readability_chunks = 0
 
@@ -129,19 +131,21 @@ if soup:
             st.markdown(f"### Chunk {i+1}: {chunk['semantic_role']}")
             st.markdown(f"**Tokens:** {chunk['token_count']}, **Readability:** {chunk['readability']:.2f}")
             st.text(chunk['text'])
-
-            with st.expander("Detected Entities"):
-                entities = extract_basic_entities(chunk['text'])
-                st.write(entities if entities else "No entities detected.")
+            with st.expander("Entities Detected via Dandelion API"):
+                entities = extract_entities_dandelion(chunk['text'])
+                if entities:
+                    st.write(entities)
+                else:
+                    st.write("No entities detected.")
 
             if chunk['token_count'] > 300:
                 oversized_chunks += 1
             if chunk['readability'] < 60:
                 low_readability_chunks += 1
 
-        # === Visualizations ===
-        st.subheader("📊 Chunk Metrics Visualization")
+        st.subheader("🔍 Chunk Metrics Visualization")
         df = pd.DataFrame(chunks)
+
         fig, ax = plt.subplots(figsize=(10, 4))
         sns.histplot(df['token_count'], bins=15, kde=False, ax=ax, color='skyblue')
         ax.set_title("Token Count per Chunk")
@@ -156,7 +160,6 @@ if soup:
         ax2.set_ylabel("Frequency")
         st.pyplot(fig2)
 
-        # === Recommendations ===
         st.subheader("🧠 Optimization Summary & Recommendations")
         if oversized_chunks > 0:
             st.markdown(f"- ✂️ **{oversized_chunks} content chunks exceed 300 tokens**. Consider splitting them for better LLM indexing.")
@@ -175,4 +178,4 @@ if soup:
         st.success("Analysis complete. Use this to improve LLM crawlability and visibility.")
 
 st.markdown("---")
-st.caption("Built for GenAI content optimization. Supports semantic tags and basic entity enrichment.")
+st.caption("Built for GenAI content optimization. Now using Dandelion API for entity enrichment.")
