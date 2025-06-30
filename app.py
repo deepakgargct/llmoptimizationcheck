@@ -11,11 +11,8 @@ import tiktoken
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from requests_html import HTMLSession
 import logging
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 nltk.download('punkt')
 nltk.download('stopwords')
@@ -51,46 +48,15 @@ def analyze_readability(text):
     except:
         return 0.0
 
-def fetch_url_content(url, selenium_mode=False):
+def fetch_url_with_js(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        if selenium_mode:
-            options = Options()
-            options.add_argument('--headless')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--no-sandbox')
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=options)
-            driver.get(url)
-            html = driver.page_source
-            driver.quit()
-            return BeautifulSoup(html, 'html.parser')
-        else:
-            response = requests.get(url, headers=headers, timeout=10)
-            content_type = response.headers.get('Content-Type', '')
-            if 'text/html' not in content_type:
-                st.warning(f"Unsupported content type: {content_type}")
-                return None
-            soup = BeautifulSoup(response.content, 'html.parser')
-            return soup
+        session = HTMLSession()
+        response = session.get(url)
+        response.html.render(timeout=20)
+        return response.html.html
     except Exception as e:
-        st.error(f"Error fetching URL: {e}")
+        st.error(f"JS-rendered fetch failed: {e}")
         return None
-
-def fetch_robots_txt(url):
-    try:
-        parsed_url = urlparse(url)
-        robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
-        response = requests.get(robots_url, timeout=5)
-        if response.status_code == 200:
-            return response.text
-        return ""
-    except:
-        return ""
-
-def detect_schema_markup(soup):
-    jsonld_scripts = soup.find_all('script', type='application/ld+json')
-    return len(jsonld_scripts) > 0
 
 def extract_chunks(soup):
     chunks = []
@@ -131,16 +97,13 @@ st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
 st.title("GenAI Optimization Checker")
 
 url = st.text_input("Enter a URL to analyze:", "https://example.com")
-selenium_mode = st.checkbox("Use Selenium for JavaScript-rendered pages", value=False)
 run_button = st.button("Analyze")
 
 if run_button:
     with st.spinner("Fetching and analyzing content..."):
-        soup = fetch_url_content(url, selenium_mode=selenium_mode)
-        robots_txt = fetch_robots_txt(url)
-        schema_present = detect_schema_markup(soup) if soup else False
-
-        if soup:
+        html = fetch_url_with_js(url)
+        if html:
+            soup = BeautifulSoup(html, 'html.parser')
             chunks = extract_chunks(soup)
             if not chunks:
                 st.warning("No significant content chunks found.")
@@ -193,20 +156,12 @@ if run_button:
 
                 st.markdown("---")
                 st.markdown("### 🔧 Further Optimization Suggestions")
-                if not schema_present:
-                    st.markdown("- ⚠️ Add schema.org JSON-LD markup to improve semantic clarity.")
-                else:
-                    st.markdown("- ✅ Schema.org JSON-LD markup detected.")
-
-                if 'GPTBot' in robots_txt or 'Disallow' in robots_txt.lower():
-                    st.markdown("- ⚠️ Review `robots.txt`: It may block LLM crawlers like GPTBot.")
-                else:
-                    st.markdown("- ✅ `robots.txt` allows LLM crawling.")
-
+                st.markdown("- Add schema.org JSON-LD markup to improve semantic clarity.")
+                st.markdown("- Ensure the `robots.txt` and `llms.txt` files do not block AI crawlers.")
                 st.markdown("- Use more descriptive internal link anchor text.")
                 st.markdown("- Cover related entities or topics missing from detected entity set.")
 
                 st.success("Analysis complete. Use this to improve LLM crawlability and visibility.")
 
 st.markdown("---")
-st.caption("Built for GenAI content optimization. Supports semantic tags, schema detection, and robots.txt checks. Optional JS-rendered scraping with Selenium.")
+st.caption("Built for GenAI content optimization. Supports semantic tags and Dandelion entity enrichment.")
