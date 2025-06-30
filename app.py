@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from textstat import flesch_reading_ease
-from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.tokenize import sent_tokenize
 from nltk.corpus import stopwords
 import nltk
 import pandas as pd
@@ -12,28 +12,28 @@ import seaborn as sns
 import tiktoken
 import re
 
-# NLTK setup
+# Download nltk data
 nltk.download('punkt')
 nltk.download('stopwords')
+
+# Setup
 stop_words = set(stopwords.words('english'))
 tokenizer = tiktoken.get_encoding("cl100k_base")
+DANDELION_TOKEN = st.secrets.get("DANDELION_API_KEY")
 
-EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
-AMBIGUOUS_PHRASES_MAP = {
-    "click here": "→ Replace with descriptive anchor text like 'view pricing page'",
-    "learn more": "→ Clarify what user will learn, e.g., 'learn about subscription plans'",
-    "read more": "→ Specify subject: 'read the case study'",
-    "overview": "→ Use topic-specific title like 'SEO strategy breakdown'",
-    "details": "→ Be precise, e.g., 'pricing details for Pro plan'",
-    "more info": "→ Expand into 'more information about onboarding'",
-    "start now": "→ Rephrase as 'start your free trial now'",
-    "this article": "→ Add article title or subject: 'this guide to B2B SEO'",
-    "the following": "→ Be direct, e.g., 'the following metrics: CTR, bounce rate…'",
-    "some believe": "→ Avoid ambiguity: 'studies suggest' or cite sources",
-    "it could be argued": "→ Remove or clarify with facts or references"
+AMBIGUOUS_PHRASES = {
+    "overview": "Use specific headings like 'SEO strategy breakdown' or 'Audit Summary'.",
+    "click here": "Use descriptive anchor text like 'See SEO case study'.",
+    "read more": "Use direct phrasing like 'Explore keyword optimization methods'.",
+    "details": "Replace with 'Technical SEO breakdown' or similar.",
+    "learn more": "Be specific: e.g. 'Learn more about schema implementation'.",
+    "start now": "Clarify what user is starting: 'Start optimizing your blog SEO'.",
+    "some believe": "Avoid vague phrasing. Be precise or cite a source.",
+    "it could be argued": "Replace with concrete data or authoritative quote."
 }
 
-# Utility Functions
+EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
+
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -46,17 +46,33 @@ def analyze_readability(text):
 def fetch_url_content(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers)
         soup = BeautifulSoup(response.content, 'html.parser')
         return soup
     except Exception as e:
-        st.error(f"Error fetching URL: {e}")
+        st.error(f"Error fetching content: {e}")
         return None
+
+def extract_entities(text):
+    if not DANDELION_TOKEN:
+        return []
+    try:
+        payload = {
+            'text': text,
+            'lang': 'en',
+            'token': DANDELION_TOKEN
+        }
+        r = requests.get("https://api.dandelion.eu/datatxt/nex/v1", params=payload)
+        if r.status_code == 200:
+            data = r.json()
+            return [e['spot'] for e in data.get('annotations', [])]
+    except Exception as e:
+        st.error(f"Entity extraction failed: {e}")
+    return []
 
 def extract_chunks(soup):
     for tag in EXCLUDED_TAGS:
-        for element in soup.find_all(tag):
-            element.decompose()
+        [el.decompose() for el in soup.find_all(tag)]
 
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
@@ -64,74 +80,76 @@ def extract_chunks(soup):
         if len(text.split()) > 30:
             tokens = count_tokens(text)
             readability = analyze_readability(text)
-            ambiguous_hits = [p for p in AMBIGUOUS_PHRASES_MAP.keys() if p in text.lower()]
             quality_score = 100
-            if tokens > 300:
-                quality_score -= 15
-            if readability < 60:
-                quality_score -= 15
-            if ambiguous_hits:
-                quality_score -= 10 * len(ambiguous_hits)
+            ambiguous_hits = []
+            fixes = []
+
+            for phrase, suggestion in AMBIGUOUS_PHRASES.items():
+                if phrase in text.lower():
+                    ambiguous_hits.append(phrase)
+                    fixes.append(f"👉 **{phrase}** → {suggestion}")
+
+            if tokens > 300: quality_score -= 10
+            if readability < 60: quality_score -= 15
+            if ambiguous_hits: quality_score -= 10 * len(ambiguous_hits)
+
+            entities = extract_entities(text) if DANDELION_TOKEN else []
+
             chunks.append({
                 'text': text[:300] + '...' if len(text) > 300 else text,
                 'token_count': tokens,
                 'readability': readability,
                 'ambiguous_phrases': ambiguous_hits,
-                'quality_score': max(0, quality_score)
+                'ambiguous_fixes': fixes,
+                'quality_score': max(0, quality_score),
+                'entities': entities
             })
     return chunks
 
-def extract_glossary(chunks):
-    glossary = []
-    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<definition>.+?)\.")
-    for chunk in chunks:
-        matches = pattern.findall(chunk['text'])
-        for match in matches:
-            glossary.append({'term': match[0].strip(), 'definition': match[2].strip()})
-    return glossary
+def generate_recommendations(chunk):
+    recs = []
+    if chunk['readability'] < 60:
+        recs.append("Improve sentence clarity and reduce jargon.")
+    if chunk['token_count'] > 300:
+        recs.append("Split this chunk into smaller logical sections.")
+    if not chunk['entities']:
+        recs.append("Include industry-relevant entities or terminology.")
+    if not chunk['ambiguous_phrases']:
+        recs.append("Consider adding direct answers or FAQs for LLM readiness.")
+    return recs
 
-def get_key_takeaways(chunks, top_n=3):
-    sorted_chunks = sorted(chunks, key=lambda x: x['quality_score'], reverse=True)
-    return sorted_chunks[:top_n]
-
-def export_flagged_chunks(chunks):
-    df = pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
-    return df
-
-# Streamlit App
+# Streamlit UI
 st.set_page_config(page_title="GenAI Optimization Checker", layout="wide")
-st.title("GenAI Optimization Checker")
+st.title("🧠 GenAI Optimization Checker")
 
-# Sidebar
 with st.sidebar:
-    option = st.radio("Select content input:", ["URL", "HTML file", "Raw HTML", ".txt file"])
+    method = st.radio("Input method", ["URL", "HTML file", "Raw HTML", ".txt file"])
     html_content = ""
 
-    if option == "URL":
-        url = st.text_input("Enter URL to analyze:")
+    if method == "URL":
+        url = st.text_input("Enter URL")
         if st.button("Fetch URL"):
             soup = fetch_url_content(url)
             html_content = soup.prettify() if soup else ""
-    elif option == "HTML file":
-        uploaded_file = st.file_uploader("Upload HTML file", type=["html"])
-        if uploaded_file:
-            html_content = uploaded_file.read().decode("utf-8")
-    elif option == "Raw HTML":
-        html_content = st.text_area("Paste raw HTML code:")
-    elif option == ".txt file":
-        uploaded_txt = st.file_uploader("Upload .txt file", type="txt")
-        if uploaded_txt:
-            html_content = uploaded_txt.read().decode("utf-8")
+    elif method == "HTML file":
+        f = st.file_uploader("Upload HTML", type=["html"])
+        if f: html_content = f.read().decode("utf-8")
+    elif method == "Raw HTML":
+        html_content = st.text_area("Paste HTML here")
+    elif method == ".txt file":
+        f = st.file_uploader("Upload .txt", type=["txt"])
+        if f: html_content = f.read().decode("utf-8")
 
-# Main Content
 if html_content:
     soup = BeautifulSoup(html_content, 'html.parser')
     chunks = extract_chunks(soup)
 
     if not chunks:
-        st.warning("No meaningful content chunks found.")
+        st.warning("No valid content chunks found.")
     else:
-        tabs = st.tabs(["🔍 Analysis", "📘 Glossary", "📌 Key Takeaways", "📊 Visualizations", "📤 Export"])
+        df = pd.DataFrame(chunks)
+
+        tabs = st.tabs(["🔍 Analysis", "📌 Recommendations", "📊 Visualizations", "📘 Entities", "📤 Export"])
 
         with tabs[0]:
             st.subheader("Chunk Analysis")
@@ -140,48 +158,43 @@ if html_content:
                 st.markdown(f"**Tokens:** {chunk['token_count']} | **Readability:** {chunk['readability']:.2f} | **Quality Score:** {chunk['quality_score']}%")
                 st.text(chunk['text'])
                 if chunk['ambiguous_phrases']:
-                    for phrase in chunk['ambiguous_phrases']:
-                        suggestion = AMBIGUOUS_PHRASES_MAP.get(phrase, "→ Consider clarifying")
-                        st.warning(f"⚠️ Ambiguous phrase: **{phrase}**\n\n👉 {suggestion}")
+                    for fix in chunk['ambiguous_fixes']:
+                        st.warning(fix)
 
         with tabs[1]:
-            st.subheader("📘 Glossary Builder")
-            glossary = extract_glossary(chunks)
-            if glossary:
-                glossary_df = pd.DataFrame(glossary)
-                st.dataframe(glossary_df)
-            else:
-                st.info("No glossary terms found.")
+            st.subheader("📌 AI/LLM Optimization Recommendations")
+            for i, chunk in enumerate(chunks):
+                recs = generate_recommendations(chunk)
+                st.markdown(f"**Chunk {i+1} Suggestions:**")
+                for rec in recs:
+                    st.markdown(f"- {rec}")
 
         with tabs[2]:
-            st.subheader("📌 Key Takeaways")
-            takeaways = get_key_takeaways(chunks)
-            for i, chunk in enumerate(takeaways):
-                st.markdown(f"**Takeaway {i+1}:** {chunk['text']}")
-
-        with tabs[3]:
-            st.subheader("📊 Content Quality Visualizations")
-            df = pd.DataFrame(chunks)
-
+            st.subheader("📊 Visualization")
             fig1, ax1 = plt.subplots()
-            sns.histplot(df['quality_score'], bins=10, kde=True, ax=ax1, color='orange')
-            ax1.set_title("Chunk Quality Score Distribution")
-            ax1.set_xlabel("Quality Score")
+            sns.histplot(df['quality_score'], bins=10, kde=True, ax=ax1, color='green')
+            ax1.set_title("Quality Score Distribution")
             st.pyplot(fig1)
 
             fig2, ax2 = plt.subplots()
             sns.scatterplot(data=df, x="token_count", y="readability", ax=ax2)
-            ax2.set_title("Token Count vs Readability")
+            ax2.set_title("Tokens vs Readability")
             st.pyplot(fig2)
 
-        with tabs[4]:
-            st.subheader("📤 Export Flagged Chunks")
-            flagged_df = export_flagged_chunks(chunks)
-            if not flagged_df.empty:
-                st.dataframe(flagged_df)
-                csv = flagged_df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download Flagged Chunks as CSV", csv, "flagged_chunks.csv", "text/csv")
-            else:
-                st.success("No flagged chunks to export!")
+        with tabs[3]:
+            st.subheader("📘 Entities Found (via Dandelion)")
+            for i, chunk in enumerate(chunks):
+                if chunk['entities']:
+                    st.markdown(f"**Chunk {i+1} Entities:** {', '.join(chunk['entities'])}")
 
-st.caption("🧠 Built for GenAI + LLM optimization. Analyze clarity, structure, and chunk quality for better AI visibility.")
+        with tabs[4]:
+            st.subheader("📤 Export Flagged Chunks (Quality < 70)")
+            flagged = df[df['quality_score'] < 70]
+            if not flagged.empty:
+                st.dataframe(flagged)
+                csv = flagged.to_csv(index=False).encode('utf-8')
+                st.download_button("Download as CSV", csv, "flagged_chunks.csv", "text/csv")
+            else:
+                st.success("No poorly scored chunks found!")
+
+st.caption("LLM + SEO Optimizer | Highlights structure, quality, ambiguous phrasing, and retrieval readiness")
