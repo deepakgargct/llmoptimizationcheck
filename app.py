@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Constants
-DANDELION_TOKEN = "YOUR_DANDELION_API_KEY"  # Replace with your Dandelion API key
+DANDELION_TOKEN = "21fb3da5b0d7483bbfe0dff5078ecaf0"  # Replace with your Dandelion API key
 
 # Tokenizer setup
 tokenizer = tiktoken.get_encoding("cl100k_base")
