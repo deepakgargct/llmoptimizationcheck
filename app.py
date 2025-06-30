@@ -11,39 +11,25 @@ import tiktoken
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import logging
 import re
 
+# Download NLTK data
 nltk.download('punkt')
 nltk.download('stopwords')
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
+# Setup
 stop_words = set(stopwords.words('english'))
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
-# Semantic tag mapping
-SEMANTIC_MAP = {
-    "section": "Generic Section",
-    "article": "Article or Post",
-    "aside": "Sidebar/Comment",
-    "header": "Header",
-    "footer": "Footer",
-    "nav": "Navigation",
-    "main": "Main Content",
-    "figure": "Image or Chart Block",
-    "blockquote": "Quote or Testimonial",
-    "p": "Paragraph",
-    "div": "Content Block",
-    "h2": "Subheading",
-    "h3": "Sub-subheading"
-}
+AMBIGUOUS_PHRASES = [
+    "click here", "learn more", "read more", "overview", "details",
+    "more info", "start now", "this article", "the following",
+    "some believe", "it could be argued"
+]
 
-# Load API key securely
-DANDELION_TOKEN = st.secrets.get("DANDELION_API_KEY", "")
+EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
 
+# Utility Functions
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -53,149 +39,143 @@ def analyze_readability(text):
     except:
         return 0.0
 
-def extract_entities_dandelion(text):
+def fetch_url_content(url):
     try:
-        url = "https://api.dandelion.eu/datatxt/nex/v1"
-        params = {
-            'text': text,
-            'lang': 'en',
-            'include': 'types,categories,lod',
-            'token': DANDELION_TOKEN
-        }
-        response = requests.get(url, params=params)
-        data = response.json()
-        entities = [ann['spot'] for ann in data.get('annotations', [])]
-        return list(set(entities))
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return soup
     except Exception as e:
-        st.error(f"Entity extraction error: {e}")
-        return []
-
-def fetch_content_from_input(input_mode):
-    if input_mode == "URL":
-        url = st.text_input("Enter a URL:")
-        if st.button("Fetch from URL") and url:
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers, timeout=10)
-                if 'text/html' in response.headers.get('Content-Type', ''):
-                    return BeautifulSoup(response.content, 'html.parser')
-                else:
-                    st.warning("URL did not return HTML content.")
-            except Exception as e:
-                st.error(f"Error fetching URL: {e}")
-
-    elif input_mode == "Upload HTML File":
-        uploaded_file = st.file_uploader("Upload an HTML file", type=["html"])
-        if uploaded_file:
-            return BeautifulSoup(uploaded_file.read(), 'html.parser')
-
-    elif input_mode == "Paste HTML Code":
-        html_code = st.text_area("Paste raw HTML code:")
-        if st.button("Parse HTML") and html_code:
-            return BeautifulSoup(html_code, 'html.parser')
-
-    elif input_mode == "Upload .txt File":
-        txt_file = st.file_uploader("Upload a .txt file", type=["txt"])
-        if txt_file:
-            raw_text = txt_file.read().decode("utf-8")
-            soup = BeautifulSoup("<p>" + raw_text.replace("\n", "</p><p>") + "</p>", 'html.parser')
-            return soup
-
-    return None
+        st.error(f"Error fetching URL: {e}")
+        return None
 
 def extract_chunks(soup):
-    chunks = []
-    glossary_terms = set()
+    for tag in EXCLUDED_TAGS:
+        for element in soup.find_all(tag):
+            element.decompose()
 
-    for tag in soup.find_all(['h2', 'h3', 'section', 'article', 'div', 'p']):
+    chunks = []
+    for tag in soup.find_all(['section', 'article', 'div', 'p']):
         text = tag.get_text(strip=True)
-        if len(text.split()) > 20:
+        if len(text.split()) > 30:
             tokens = count_tokens(text)
             readability = analyze_readability(text)
-            tag_name = tag.name
-            semantic_label = SEMANTIC_MAP.get(tag_name, f"{tag_name.title()} Block")
-            
-            # Glossary heuristic (detect capitalized or technical terms)
-            glossary_terms.update(re.findall(r'\\b[A-Z][a-z]{2,}(?:\\s+[A-Z][a-z]{2,})*\\b', text))
-
+            ambiguous_hits = [p for p in AMBIGUOUS_PHRASES if p in text.lower()]
+            quality_score = 100
+            if tokens > 300:
+                quality_score -= 15
+            if readability < 60:
+                quality_score -= 15
+            if ambiguous_hits:
+                quality_score -= 10 * len(ambiguous_hits)
             chunks.append({
                 'text': text[:300] + '...' if len(text) > 300 else text,
                 'token_count': tokens,
                 'readability': readability,
-                'semantic_role': semantic_label,
-                'is_self_contained': text.count('.') >= 2
+                'ambiguous_phrases': ambiguous_hits,
+                'quality_score': max(0, quality_score)
             })
+    return chunks
 
-    return chunks, sorted(glossary_terms)
+def extract_glossary(chunks):
+    glossary = []
+    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<definition>.+?)\.")
+    for chunk in chunks:
+        matches = pattern.findall(chunk['text'])
+        for match in matches:
+            glossary.append({'term': match[0].strip(), 'definition': match[2].strip()})
+    return glossary
 
-# UI
-st.set_page_config(page_title="GenAI Optimization Toolkit", layout="wide")
-st.title("🔎 GenAI Optimization Checker")
+def get_key_takeaways(chunks, top_n=3):
+    sorted_chunks = sorted(chunks, key=lambda x: x['quality_score'], reverse=True)
+    return sorted_chunks[:top_n]
 
-input_mode = st.radio("Choose content input method:", ["URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
-soup = fetch_content_from_input(input_mode)
+def export_flagged_chunks(chunks):
+    df = pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
+    return df
 
-if soup:
-    with st.spinner("Analyzing content..."):
-        chunks, glossary = extract_chunks(soup)
+# Streamlit UI
+st.set_page_config(page_title="GenAI Optimization Checker", layout="wide")
+st.title("GenAI Optimization Checker")
 
-        if not chunks:
-            st.warning("No significant content chunks found.")
-        else:
-            st.subheader("📚 Individual Chunk Reports")
-            oversized = low_readability = warnings = 0
+# Sidebar Input
+with st.sidebar:
+    option = st.radio("Select input method:", ["URL", "HTML file", "Raw HTML", ".txt file"])
+    html_content = ""
 
+    if option == "URL":
+        url = st.text_input("Enter URL to analyze:")
+        if st.button("Fetch URL"):
+            soup = fetch_url_content(url)
+            html_content = soup.prettify() if soup else ""
+    elif option == "HTML file":
+        uploaded_file = st.file_uploader("Upload HTML file", type=["html"])
+        if uploaded_file:
+            html_content = uploaded_file.read().decode("utf-8")
+    elif option == "Raw HTML":
+        html_content = st.text_area("Paste raw HTML code:")
+    elif option == ".txt file":
+        uploaded_txt = st.file_uploader("Upload .txt file", type="txt")
+        if uploaded_txt:
+            html_content = uploaded_txt.read().decode("utf-8")
+
+# Main Content
+if html_content:
+    soup = BeautifulSoup(html_content, 'html.parser')
+    chunks = extract_chunks(soup)
+
+    if not chunks:
+        st.warning("No meaningful content chunks found.")
+    else:
+        tabs = st.tabs(["🔍 Analysis", "📘 Glossary", "📌 Key Takeaways", "📊 Visualizations", "📤 Export"])
+
+        with tabs[0]:
+            st.subheader("Chunk Analysis")
             for i, chunk in enumerate(chunks):
-                st.markdown(f"#### Chunk {i+1} - {chunk['semantic_role']}")
-                st.markdown(f"**Tokens:** {chunk['token_count']} | **Readability:** {chunk['readability']:.2f} | **Self-contained:** {'✅' if chunk['is_self_contained'] else '⚠️'}")
+                st.markdown(f"### Chunk {i+1}")
+                st.markdown(f"**Tokens:** {chunk['token_count']} | **Readability:** {chunk['readability']:.2f} | **Quality Score:** {chunk['quality_score']}%")
                 st.text(chunk['text'])
-                entities = extract_entities_dandelion(chunk['text'])
-                with st.expander("Entities"):
-                    st.write(entities if entities else "No entities detected")
+                if chunk['ambiguous_phrases']:
+                    st.warning(f"⚠️ Ambiguous phrases: {', '.join(chunk['ambiguous_phrases'])}")
 
-                if chunk['token_count'] > 300:
-                    oversized += 1
-                if chunk['readability'] < 60:
-                    low_readability += 1
-                if not chunk['is_self_contained']:
-                    warnings += 1
+        with tabs[1]:
+            st.subheader("📘 Glossary Builder")
+            glossary = extract_glossary(chunks)
+            if glossary:
+                glossary_df = pd.DataFrame(glossary)
+                st.dataframe(glossary_df)
+            else:
+                st.info("No glossary terms found.")
 
-            st.subheader("📊 Chunk Score Visualizations")
+        with tabs[2]:
+            st.subheader("📌 Key Takeaways")
+            takeaways = get_key_takeaways(chunks)
+            for i, chunk in enumerate(takeaways):
+                st.markdown(f"**Takeaway {i+1}:** {chunk['text']}")
+
+        with tabs[3]:
+            st.subheader("📊 Content Quality Visualizations")
             df = pd.DataFrame(chunks)
+
             fig1, ax1 = plt.subplots()
-            sns.histplot(df['token_count'], bins=10, ax=ax1, color='skyblue')
-            ax1.set_title("Token Count per Chunk")
+            sns.histplot(df['quality_score'], bins=10, kde=True, ax=ax1, color='orange')
+            ax1.set_title("Chunk Quality Score Distribution")
+            ax1.set_xlabel("Quality Score")
             st.pyplot(fig1)
 
             fig2, ax2 = plt.subplots()
-            sns.histplot(df['readability'], bins=10, ax=ax2, color='lightgreen')
-            ax2.set_title("Readability Distribution")
+            sns.scatterplot(data=df, x="token_count", y="readability", ax=ax2)
+            ax2.set_title("Token Count vs Readability")
             st.pyplot(fig2)
 
-            st.subheader("🧠 Summary & Warnings")
-            if oversized:
-                st.markdown(f"- ✂️ **{oversized} chunks exceed 300 tokens.** Consider splitting.")
-            if low_readability:
-                st.markdown(f"- 📉 **{low_readability} chunks have poor readability (<60).** Simplify the language.")
-            if warnings:
-                st.markdown(f"- 🧩 **{warnings} chunks are not self-contained.** Consider improving clarity.")
-            if not (oversized or low_readability or warnings):
-                st.success("All content chunks are within optimal ranges!")
-
-            st.subheader("📘 Glossary Terms Detected")
-            if glossary:
-                st.write(glossary)
+        with tabs[4]:
+            st.subheader("📤 Export Flagged Chunks")
+            flagged_df = export_flagged_chunks(chunks)
+            if not flagged_df.empty:
+                st.dataframe(flagged_df)
+                csv = flagged_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download Flagged Chunks as CSV", csv, "flagged_chunks.csv", "text/csv")
             else:
-                st.write("No glossary candidates detected.")
+                st.success("No flagged chunks to export!")
 
-            st.markdown("---")
-            st.markdown("### 🔧 Further Optimization Suggestions")
-            st.markdown("- Add schema.org markup for clarity.")
-            st.markdown("- Ensure robots.txt and llms.txt allow GPTBot, Google-Extended, etc.")
-            st.markdown("- Add bylines with credentials and update dates.")
-            st.markdown("- Build FAQ, how-to, and comparison blocks with headings that reflect queries.")
-
-            st.success("Analysis Complete ✅")
-
-st.markdown("---")
-st.caption("Built for GenAI optimization and AI visibility. Supports semantic tags, glossary extraction, and chunk validation.")
+st.caption("🧠 Built for GenAI + LLM optimization. Analyze clarity, structure, and chunk quality for better AI visibility.")
