@@ -12,7 +12,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
-import re
 
 nltk.download('punkt')
 nltk.download('stopwords')
@@ -36,9 +35,6 @@ SEMANTIC_MAP = {
     "blockquote": "Quote or Testimonial"
 }
 
-QUESTION_TYPES = ["what", "how", "why", "when", "who", "which", "can", "does", "do", "is", "are", "should"]
-
-
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -48,167 +44,145 @@ def analyze_readability(text):
     except:
         return 0.0
 
-def fetch_url_content(url):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        content_type = response.headers.get('Content-Type', '')
-        if 'text/html' not in content_type:
-            st.warning(f"Unsupported content type: {content_type}")
-            return None
-        soup = BeautifulSoup(response.content, 'html.parser')
-        return soup
-    except Exception as e:
-        st.error(f"Error fetching URL: {e}")
-        return None
-
-def is_self_contained(text):
-    sentences = sent_tokenize(text)
-    if len(sentences) < 2:
-        return False
-    pronouns = ['this', 'that', 'these', 'those', 'it', 'they', 'them']
-    first_sentence = sentences[0].lower()
-    return not any(pronoun in first_sentence.split()[:3] for pronoun in pronouns)
-
-def is_query_like_heading(text):
-    text = text.lower().strip(" ?")
-    return any(text.startswith(q) for q in QUESTION_TYPES)
+def parse_html(content):
+    return BeautifulSoup(content, 'html.parser')
 
 def extract_chunks(soup):
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
         text = tag.get_text(strip=True)
-        if len(text.split()) > 20:
-            sentences = sent_tokenize(text)
-            chunk_text = ""
-            for sentence in sentences:
-                chunk_text += sentence + " "
-                token_len = count_tokens(chunk_text.strip())
-                if token_len >= 100:
-                    trimmed = chunk_text.strip()
-                    if token_len <= 300:
-                        readability = analyze_readability(trimmed)
-                        semantic_label = SEMANTIC_MAP.get(tag.name, f"{tag.name.title()} Block")
-                        chunks.append({
-                            'text': trimmed[:300] + '...' if len(trimmed) > 300 else trimmed,
-                            'token_count': token_len,
-                            'readability': readability,
-                            'semantic_role': semantic_label,
-                            'self_contained': is_self_contained(trimmed),
-                            'query_like': is_query_like_heading(trimmed.split(".")[0])
-                        })
-                    chunk_text = ""
+        if len(text.split()) > 30:
+            tokens = count_tokens(text)
+            readability = analyze_readability(text)
+            tag_name = tag.name
+            semantic_label = SEMANTIC_MAP.get(tag_name, f"{tag_name.title()} Block")
+            chunks.append({
+                'text': text[:300] + '...' if len(text) > 300 else text,
+                'token_count': tokens,
+                'readability': readability,
+                'semantic_role': semantic_label
+            })
     return chunks
 
-def analyze_internal_links(soup, base_url):
-    links = []
+def extract_internal_links(soup, base_url):
     base_domain = urlparse(base_url).netloc
+    links = []
     for a in soup.find_all('a', href=True):
         href = a['href']
         full_url = urljoin(base_url, href)
         if urlparse(full_url).netloc == base_domain:
-            anchor = a.get_text(strip=True)
+            anchor_text = a.get_text(strip=True)
             links.append({
-                'url': full_url,
-                'anchor_text': anchor,
-                'descriptive': len(anchor.split()) > 2
+                'anchor_text': anchor_text,
+                'descriptive': len(anchor_text.split()) > 2,
+                'url': full_url
             })
     return links
 
-def extract_entities_basic(text):
+def extract_basic_entities(text):
     tokens = word_tokenize(text)
-    return list(set([w for w in tokens if w.istitle() and w.lower() not in stop_words and len(w) > 3]))
+    return list(set([word for word in tokens if word[0].isupper() and word.lower() not in stop_words and len(word) > 2]))
 
 # Streamlit UI
 st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
 st.title("GenAI Optimization Checker")
 
-url = st.text_input("Enter a URL to analyze:", "https://example.com")
-run_button = st.button("Analyze")
+st.markdown("### Input Options")
+input_type = st.radio("Choose input type:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
+html_content = ""
+base_url = "https://example.com"
 
-if run_button:
-    with st.spinner("Fetching and analyzing content..."):
-        soup = fetch_url_content(url)
-        if soup:
-            chunks = extract_chunks(soup)
-            internal_links = analyze_internal_links(soup, url)
+if input_type == "Enter URL":
+    url = st.text_input("Enter a URL to analyze:", "https://example.com")
+    if st.button("Fetch URL"):
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=10)
+            html_content = response.text
+            base_url = url
+        except Exception as e:
+            st.error(f"Error fetching URL: {e}")
 
-            if not chunks:
-                st.warning("No significant content chunks found.")
-            else:
-                st.subheader("Content Chunks")
-                oversized_chunks = 0
-                low_readability_chunks = 0
-                missing_query_headings = 0
-                not_self_contained = 0
-                all_entities = set()
+elif input_type == "Upload HTML File":
+    html_file = st.file_uploader("Upload an HTML file", type="html")
+    if html_file:
+        html_content = html_file.read().decode("utf-8")
 
-                for i, chunk in enumerate(chunks):
-                    st.markdown(f"### Chunk {i+1}: {chunk['semantic_role']}")
-                    st.markdown(f"**Tokens:** {chunk['token_count']}, **Readability:** {chunk['readability']:.2f}")
-                    st.text(chunk['text'])
+elif input_type == "Paste HTML Code":
+    html_content = st.text_area("Paste HTML code here")
 
-                    entities = extract_entities_basic(chunk['text'])
-                    all_entities.update(entities)
-                    if entities:
-                        st.markdown("**Entities:**")
-                        st.write(entities)
+elif input_type == "Upload .txt File":
+    txt_file = st.file_uploader("Upload a text file", type="txt")
+    if txt_file:
+        html_content = f"<p>{txt_file.read().decode('utf-8')}</p>"
 
-                    if not chunk['self_contained']:
-                        not_self_contained += 1
-                    if not chunk['query_like']:
-                        missing_query_headings += 1
-                    if chunk['token_count'] > 300:
-                        oversized_chunks += 1
-                    if chunk['readability'] < 60:
-                        low_readability_chunks += 1
+if html_content:
+    soup = parse_html(html_content)
+    chunks = extract_chunks(soup)
+    if not chunks:
+        st.warning("No significant content chunks found.")
+    else:
+        st.subheader("Content Chunks")
+        oversized_chunks = 0
+        low_readability_chunks = 0
 
-                st.subheader("🔍 Chunk Metrics Visualization")
-                df = pd.DataFrame(chunks)
-                fig, ax = plt.subplots(figsize=(10, 4))
-                sns.histplot(df['token_count'], bins=15, kde=False, ax=ax, color='skyblue')
-                ax.set_title("Token Count per Chunk")
-                ax.set_xlabel("Token Count")
-                ax.set_ylabel("Frequency")
-                st.pyplot(fig)
-
-                fig2, ax2 = plt.subplots(figsize=(10, 4))
-                sns.histplot(df['readability'], bins=15, kde=True, ax=ax2, color='lightgreen')
-                ax2.set_title("Readability Score per Chunk")
-                ax2.set_xlabel("Flesch Reading Ease")
-                ax2.set_ylabel("Frequency")
-                st.pyplot(fig2)
-
-                st.subheader("🧠 Optimization Summary & Recommendations")
-                if oversized_chunks > 0:
-                    st.markdown(f"- ✂️ **{oversized_chunks} chunks exceed 300 tokens**. Consider splitting them.")
-                if low_readability_chunks > 0:
-                    st.markdown(f"- 📉 **{low_readability_chunks} chunks have low readability scores (<60)**. Simplify language.")
-                if not_self_contained > 0:
-                    st.markdown(f"- 🔄 **{not_self_contained} chunks lack self-contained logic**. Clarify context or avoid pronouns early on.")
-                if missing_query_headings > 0:
-                    st.markdown(f"- ❓ **{missing_query_headings} sections don't start with query-like phrases**. Consider rephrasing.")
-                if len(internal_links) > 0:
-                    weak_anchors = [l for l in internal_links if not l['descriptive']]
-                    if weak_anchors:
-                        st.markdown(f"- 🔗 **{len(weak_anchors)} internal links use vague anchor text.** Use more descriptive labels.")
-                if oversized_chunks + low_readability_chunks + not_self_contained + missing_query_headings == 0:
-                    st.markdown("✅ All content chunks are well-structured and optimized.")
-
-                st.markdown("---")
-                st.markdown("### 🔧 Further Optimization Suggestions")
-                st.markdown("- Add schema.org JSON-LD markup to improve semantic clarity.")
-                st.markdown("- Ensure the `robots.txt` and `llms.txt` files do not block AI crawlers.")
-                st.markdown("- Use more descriptive internal link anchor text.")
-                st.markdown("- Cover related entities or topics missing from detected entity set.")
-
-                st.success("Analysis complete. Use this to improve LLM crawlability and visibility.")
-
-                st.subheader("📚 All Unique Entities Detected")
-                if all_entities:
-                    st.write(sorted(all_entities))
+        for i, chunk in enumerate(chunks):
+            st.markdown(f"### Chunk {i+1}: {chunk['semantic_role']}")
+            st.markdown(f"**Tokens:** {chunk['token_count']}, **Readability:** {chunk['readability']:.2f}")
+            st.text(chunk['text'])
+            with st.expander("Entities Detected"):
+                entities = extract_basic_entities(chunk['text'])
+                if entities:
+                    st.write(entities)
                 else:
-                    st.write("No named entities detected.")
+                    st.write("No entities detected.")
+
+            if chunk['token_count'] > 300:
+                oversized_chunks += 1
+            if chunk['readability'] < 60:
+                low_readability_chunks += 1
+
+        # Visualizations
+        st.subheader("🔍 Chunk Metrics Visualization")
+        df = pd.DataFrame(chunks)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        sns.histplot(df['token_count'], bins=15, kde=False, ax=ax, color='skyblue')
+        ax.set_title("Token Count per Chunk")
+        ax.set_xlabel("Token Count")
+        ax.set_ylabel("Frequency")
+        st.pyplot(fig)
+
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        sns.histplot(df['readability'], bins=15, kde=True, ax=ax2, color='lightgreen')
+        ax2.set_title("Readability Score per Chunk")
+        ax2.set_xlabel("Flesch Reading Ease")
+        ax2.set_ylabel("Frequency")
+        st.pyplot(fig2)
+
+        # Link Analysis
+        internal_links = extract_internal_links(soup, base_url)
+        vague_links = [l for l in internal_links if not l['descriptive']]
+
+        # Recommendations Summary
+        st.subheader("🧠 Optimization Summary & Recommendations")
+        if oversized_chunks > 0:
+            st.markdown(f"- ✂️ **{oversized_chunks} content chunks exceed 300 tokens**. Consider splitting them.")
+        if low_readability_chunks > 0:
+            st.markdown(f"- 📉 **{low_readability_chunks} chunks have low readability (<60)**. Simplify language.")
+        if vague_links:
+            st.markdown(f"- 🔗 **{len(vague_links)} internal links use vague anchor text.** Improve them.")
+        if oversized_chunks == 0 and low_readability_chunks == 0 and not vague_links:
+            st.markdown("✅ All content chunks are optimized.")
+
+        st.markdown("---")
+        st.markdown("### 🔧 Further Optimization Suggestions")
+        st.markdown("- Add schema.org markup to improve content structure.")
+        st.markdown("- Include 'robots.txt' and 'llms.txt' allowing AI bots.")
+        st.markdown("- Add author name, update dates, and credential markup.")
+        st.markdown("- Build content clusters and cross-link conceptually.")
+        st.markdown("- Create glossaries, FAQs, and how-to blocks.")
+
+        st.success("Analysis complete. Optimize based on these recommendations.")
 
 st.markdown("---")
-st.caption("Built for GenAI content optimization. Supports semantic tags, link analysis, and basic entity recognition.")
+st.caption("Built for GenAI content optimization. Supports multiple input types and AI visibility checks.")
