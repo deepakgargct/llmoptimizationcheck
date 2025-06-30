@@ -12,12 +12,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
-import os
-import spacy
-import subprocess
-from io import StringIO
+import re
 
-# Download NLTK resources
 nltk.download('punkt')
 nltk.download('stopwords')
 
@@ -25,16 +21,8 @@ nltk.download('stopwords')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Ensure spaCy model is installed
-try:
-    nlp = spacy.load("en_core_web_sm")
-except:
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load("en_core_web_sm")
-
 # Constants
-DANDELION_TOKEN = "21fb3da5b0d7483bbfe0dff5078ecaf0"  # Replace with your token
-
+DANDELION_TOKEN = st.secrets.get("DANDELION_API_TOKEN", "")  # Set in Streamlit Cloud Secrets
 stop_words = set(stopwords.words('english'))
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -58,6 +46,20 @@ def analyze_readability(text):
         return flesch_reading_ease(text)
     except:
         return 0.0
+
+def fetch_url_content(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' not in content_type:
+            st.warning(f"Unsupported content type: {content_type}")
+            return None
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return soup
+    except Exception as e:
+        st.error(f"Error fetching URL: {e}")
+        return None
 
 def extract_chunks(soup):
     chunks = []
@@ -93,50 +95,49 @@ def extract_entities_dandelion(text):
         st.error(f"Entity extraction error: {e}")
         return []
 
-def parse_uploaded_file(uploaded_file):
-    if uploaded_file.name.endswith(".txt"):
-        content = uploaded_file.read().decode("utf-8")
-        return BeautifulSoup(f"<div>{content}</div>", "html.parser")
-    elif uploaded_file.name.endswith(".html"):
-        return BeautifulSoup(uploaded_file.read(), "html.parser")
-    return None
-
-def parse_raw_html(raw_code):
-    return BeautifulSoup(raw_code, "html.parser")
-
-def fetch_url_content(url):
+def parse_html_code(html_code):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        content_type = response.headers.get('Content-Type', '')
-        if 'text/html' not in content_type:
-            st.warning(f"Unsupported content type: {content_type}")
-            return None
-        return BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(html_code, 'html.parser')
+        return soup
     except Exception as e:
-        st.error(f"Error fetching URL: {e}")
+        st.error(f"HTML parsing error: {e}")
+        return None
+
+def parse_txt_file(txt_file):
+    try:
+        content = txt_file.read().decode("utf-8")
+        soup = BeautifulSoup(f"<div>{content}</div>", 'html.parser')
+        return soup
+    except Exception as e:
+        st.error(f"TXT file parsing error: {e}")
         return None
 
 # Streamlit UI
 st.set_page_config(page_title="GenAI Optimization Streamlit App", layout="wide")
 st.title("GenAI Optimization Checker")
 
-st.markdown("### Choose Content Input Method")
-option = st.radio("Select input type", ["Enter URL", "Upload HTML File", "Upload .txt File", "Paste HTML Code"])
-
+input_method = st.radio("Select Content Input Method:", ["Enter URL", "Upload HTML File", "Paste HTML Code", "Upload .txt File"])
 soup = None
-if option == "Enter URL":
-    url = st.text_input("Enter a URL to analyze:")
-    if url and st.button("Analyze URL"):
+
+if input_method == "Enter URL":
+    url = st.text_input("Enter a URL to analyze:", "https://example.com")
+    if st.button("Analyze") and url:
         soup = fetch_url_content(url)
-elif option == "Upload HTML File" or option == "Upload .txt File":
-    uploaded_file = st.file_uploader("Upload your file")
-    if uploaded_file and st.button("Analyze Uploaded File"):
-        soup = parse_uploaded_file(uploaded_file)
-elif option == "Paste HTML Code":
-    raw_html = st.text_area("Paste raw HTML code here")
-    if raw_html and st.button("Analyze HTML Code"):
-        soup = parse_raw_html(raw_html)
+
+elif input_method == "Upload HTML File":
+    html_file = st.file_uploader("Upload an HTML file", type=["html"])
+    if html_file:
+        soup = parse_html_code(html_file.read())
+
+elif input_method == "Paste HTML Code":
+    html_code = st.text_area("Paste your HTML code here")
+    if st.button("Analyze HTML") and html_code:
+        soup = parse_html_code(html_code)
+
+elif input_method == "Upload .txt File":
+    txt_file = st.file_uploader("Upload a .txt file", type=["txt"])
+    if txt_file:
+        soup = parse_txt_file(txt_file)
 
 if soup:
     chunks = extract_chunks(soup)
@@ -163,9 +164,9 @@ if soup:
             if chunk['readability'] < 60:
                 low_readability_chunks += 1
 
+        # Visualizations
         st.subheader("🔍 Chunk Metrics Visualization")
         df = pd.DataFrame(chunks)
-
         fig, ax = plt.subplots(figsize=(10, 4))
         sns.histplot(df['token_count'], bins=15, kde=False, ax=ax, color='skyblue')
         ax.set_title("Token Count per Chunk")
@@ -180,6 +181,7 @@ if soup:
         ax2.set_ylabel("Frequency")
         st.pyplot(fig2)
 
+        # Recommendations Summary
         st.subheader("🧠 Optimization Summary & Recommendations")
         if oversized_chunks > 0:
             st.markdown(f"- ✂️ **{oversized_chunks} content chunks exceed 300 tokens**. Consider splitting them for better LLM indexing.")
