@@ -21,16 +21,10 @@ from collections import Counter
 import textstat
 import wikipedia
 import nltk
-nltk.download('punkt')
-nltk.download('punkt_tab')
-
-# Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('averaged_perceptron_tagger', quiet=True)
-except:
-    pass
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
+nltk.download('punkt_tab', quiet=True)  # Ensure punkt_tab is downloaded as well
 
 # Constants
 DANDELION_TOKEN = st.secrets.get("DANDELION_API_KEY", "")
@@ -97,7 +91,7 @@ def analyze_readability(text):
 
 def calculate_clarity_score(text):
     """Calculate clarity score based on sentence structure"""
-    sentences = sent_tokenize(text)
+    sentences = sent_tokenize(text)  # Ensure punkt is downloaded and available
     if not sentences:
         return 0
     
@@ -417,73 +411,6 @@ def extract_enhanced_chunks(soup):
             chunks.append(chunk_data)
     
     return remove_duplicates(chunks)
-
-def create_topic_clusters(chunks, n_clusters=3):
-    """Create topic clusters using TF-IDF and KMeans"""
-    if len(chunks) < 2:
-        return chunks, None
-    
-    # Prepare text data
-    texts = [chunk['full_text'] for chunk in chunks]
-    
-    # TF-IDF Vectorization
-    vectorizer = TfidfVectorizer(
-        max_features=100,
-        stop_words='english',
-        ngram_range=(1, 2)
-    )
-    
-    try:
-        tfidf_matrix = vectorizer.fit_transform(texts)
-        
-        # Clustering
-        n_clusters = min(n_clusters, len(chunks))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(tfidf_matrix)
-        
-        # Add cluster labels to chunks
-        for i, chunk in enumerate(chunks):
-            chunk['cluster'] = int(cluster_labels[i])
-        
-        # PCA for visualization
-        if tfidf_matrix.shape[1] >= 2:
-            pca = PCA(n_components=2)
-            coords = pca.fit_transform(tfidf_matrix.toarray())
-            
-            cluster_data = {
-                'coords': coords,
-                'labels': cluster_labels,
-                'texts': [chunk['text'][:100] + '...' for chunk in chunks]
-            }
-            
-            return chunks, cluster_data
-        
-    except Exception as e:
-        st.warning(f"Clustering error: {str(e)}")
-    
-    return chunks, None
-
-def create_cluster_visualization(cluster_data):
-    """Create interactive cluster visualization"""
-    if not cluster_data:
-        return None
-    
-    df = pd.DataFrame({
-        'x': cluster_data['coords'][:, 0],
-        'y': cluster_data['coords'][:, 1],
-        'cluster': cluster_data['labels'],
-        'text': cluster_data['texts']
-    })
-    
-    fig = px.scatter(
-        df, x='x', y='y', color='cluster',
-        hover_data=['text'],
-        title='Content Topic Clusters',
-        labels={'x': 'PC1', 'y': 'PC2', 'cluster': 'Cluster'}
-    )
-    
-    fig.update_layout(height=500, showlegend=True)
-    return fig
 
 # Streamlit UI
 st.set_page_config(
@@ -918,120 +845,3 @@ st.markdown(
     "⚡ **Enhanced GenAI Optimization Checker** - Advanced content analysis for AI search engines, "
     "LLM retrieval readiness, and comprehensive optimization insights."
 )
-
-# Additional helper functions for advanced features
-def analyze_content_structure(soup):
-    """Analyze HTML structure for SEO insights"""
-    structure_analysis = {
-        'headings': {
-            'h1': len(soup.find_all('h1')),
-            'h2': len(soup.find_all('h2')),
-            'h3': len(soup.find_all('h3')),
-            'h4': len(soup.find_all('h4')),
-            'h5': len(soup.find_all('h5')),
-            'h6': len(soup.find_all('h6'))
-        },
-        'images': len(soup.find_all('img')),
-        'links': len(soup.find_all('a')),
-        'lists': len(soup.find_all(['ul', 'ol'])),
-        'paragraphs': len(soup.find_all('p'))
-    }
-    
-    return structure_analysis
-
-def generate_faq_suggestions(chunks):
-    """Generate FAQ suggestions based on content analysis"""
-    question_patterns = [
-        r"what (?:is|are|does|do|can|will|would|should)",
-        r"how (?:to|do|does|can|will|would|should|much|many)",
-        r"why (?:is|are|does|do|can|will|would|should)",
-        r"when (?:is|are|does|do|can|will|would|should)",
-        r"where (?:is|are|does|do|can|will|would|should)"
-    ]
-    
-    potential_faqs = []
-    
-    for chunk in chunks:
-        text = chunk['full_text'].lower()
-        
-        for pattern in question_patterns:
-            matches = re.findall(pattern + r'[^.?!]*[.?!]', text)
-            for match in matches:
-                if len(match.split()) > 4 and len(match) < 200:
-                    potential_faqs.append({
-                        'question': match.strip(),
-                        'source_chunk': chunks.index(chunk) + 1
-                    })
-    
-    return potential_faqs[:10]  # Return top 10 FAQ suggestions
-
-def calculate_semantic_similarity(chunks):
-    """Calculate semantic similarity between chunks"""
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        
-        texts = [chunk['full_text'] for chunk in chunks]
-        
-        vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
-        tfidf_matrix = vectorizer.fit_transform(texts)
-        
-        similarity_matrix = cosine_similarity(tfidf_matrix)
-        
-        # Find highly similar chunks (potential duplicates)
-        similar_pairs = []
-        for i in range(len(chunks)):
-            for j in range(i + 1, len(chunks)):
-                similarity = similarity_matrix[i][j]
-                if similarity > 0.7:  # 70% similarity threshold
-                    similar_pairs.append({
-                        'chunk1': i + 1,
-                        'chunk2': j + 1,
-                        'similarity': similarity
-                    })
-        
-        return similar_pairs
-    except:
-        return []
-
-# Add sidebar information
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("### 🔧 Features")
-    st.markdown("""
-    ✅ **Entity & Topic Coverage**  
-    ✅ **Context-Aware Suggestions**  
-    ✅ **Multi-Dimension Scoring**  
-    ✅ **Misaligned Title Detection**  
-    ✅ **LLM Optimization Tips**  
-    ✅ **Topic Clustering & Visualization**  
-    ✅ **Schema Markup Suggestions**  
-    ✅ **Entity Definition Tooltips**  
-    ✅ **Comprehensive Export Options**
-    """)
-    
-    st.markdown("### 💡 Pro Tips")
-    st.markdown("""
-    • **Quality Score 70+**: Good for AI search  
-    • **Readability 60+**: Easy to understand  
-    • **Token Count <300**: Optimal chunk size  
-    • **Clear Headings**: Avoid generic titles  
-    • **Rich Entities**: Include relevant topics
-    """)
-
-# Display additional insights if content is analyzed
-if html_content and 'chunks' in locals():
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("### 📊 Quick Stats")
-        st.metric("Total Chunks", len(chunks))
-        
-        if chunks:
-            avg_score = np.mean([chunk['quality_score'] for chunk in chunks])
-            st.metric("Avg Quality", f"{avg_score:.1f}%")
-            
-            total_tokens = sum(chunk['token_count'] for chunk in chunks)
-            st.metric("Total Tokens", total_tokens)
-            
-            entity_count = sum(len(chunk['entities']) for chunk in chunks)
-            st.metric("Entities Found", entity_count)
