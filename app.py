@@ -20,6 +20,9 @@ import plotly.graph_objects as go
 from collections import Counter
 import textstat
 import wikipedia
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
 
 # Download required NLTK data
 try:
