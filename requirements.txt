@@ -7,3 +7,4 @@ textstat
 pandas
 matplotlib
 seaborn
+spacy
