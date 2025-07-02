@@ -3,24 +3,19 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from textstat import flesch_reading_ease
-from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
 import nltk
-import json
 import tiktoken
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import re
 
-# One-time NLTK data check
+# --- One-time NLTK setup ---
 def ensure_nltk_data():
     from nltk.data import find
     try:
         find('tokenizers/punkt')
     except LookupError:
         nltk.download('punkt')
-
     try:
         find('corpora/stopwords')
     except LookupError:
@@ -47,6 +42,7 @@ AMBIGUOUS_PHRASES = {
 
 EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
 
+# --- Functions ---
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
@@ -55,6 +51,13 @@ def analyze_readability(text):
         return flesch_reading_ease(text)
     except:
         return 0.0
+
+def extract_text_from_html(html_code):
+    soup = BeautifulSoup(html_code, 'html.parser')
+    for tag in EXCLUDED_TAGS:
+        for element in soup.find_all(tag):
+            element.decompose()
+    return soup, soup.get_text()
 
 def fetch_url_content(url):
     try:
@@ -66,20 +69,35 @@ def fetch_url_content(url):
         st.error(f"Error fetching URL: {e}")
         return None
 
-def extract_chunks(soup):
-    for tag in EXCLUDED_TAGS:
-        for element in soup.find_all(tag):
-            element.decompose()
+def generate_llm_tip(text):
+    tips = []
+    lower_text = text.lower()
+    if "?" in text or "faq" in lower_text:
+        tips.append("Wrap this section with FAQ schema.")
+    if any(keyword in lower_text for keyword in ["how to", "step-by-step", "guide", "steps"]):
+        tips.append("Consider using HowTo schema markup.")
+    if "vs" in lower_text or "compare" in lower_text or "comparison" in lower_text:
+        tips.append("This section could benefit from a Comparison schema.")
+    if len(text.split()) > 150:
+        tips.append("Split into smaller paragraphs to improve LLM retrieval.")
+    if not tips:
+        tips.append("Use clearer structure or schema markup for better LLM optimization.")
+    return " ".join(tips)
 
+def extract_chunks(soup):
     seen = set()
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
         text = tag.get_text(strip=True)
-        if len(text.split()) > 30 and text not in seen:
-            seen.add(text)
-            tokens = count_tokens(text)
-            readability = analyze_readability(text)
-            ambiguous_hits = [p for p in AMBIGUOUS_PHRASES if p in text.lower()]
+        if len(text.split()) > 30:
+            clean_text = re.sub(r'\s+', ' ', text.strip())
+            if clean_text in seen:
+                continue
+            seen.add(clean_text)
+
+            tokens = count_tokens(clean_text)
+            readability = analyze_readability(clean_text)
+            ambiguous_hits = [p for p in AMBIGUOUS_PHRASES if p in clean_text.lower()]
             quality_score = 100
             if tokens > 300:
                 quality_score -= 15
@@ -88,26 +106,14 @@ def extract_chunks(soup):
             if ambiguous_hits:
                 quality_score -= 10 * len(ambiguous_hits)
             chunks.append({
-                'text': text[:300] + '...' if len(text) > 300 else text,
+                'text': clean_text[:300] + '...' if len(clean_text) > 300 else clean_text,
                 'token_count': tokens,
                 'readability': readability,
                 'ambiguous_phrases': ambiguous_hits,
                 'quality_score': max(0, quality_score),
-                'llm_tip': generate_llm_tip(text)
+                'llm_tip': generate_llm_tip(clean_text)
             })
     return chunks
-
-def generate_llm_tip(text):
-    tips = []
-    if "FAQ" in text or "?" in text:
-        tips.append("Consider wrapping this section with FAQ schema.")
-    if any(word in text.lower() for word in ["how to", "guide", "steps"]):
-        tips.append("This may qualify for HowTo schema.")
-    if len(text.split()) > 150:
-        tips.append("Break into smaller chunks to improve retrieval.")
-    if "vs" in text.lower() or "comparison" in text.lower():
-        tips.append("This could benefit from a Comparison schema.")
-    return " ".join(tips)
 
 def extract_glossary(chunks):
     glossary = []
@@ -123,43 +129,69 @@ def get_key_takeaways(chunks, top_n=3):
     return sorted_chunks[:top_n]
 
 def export_flagged_chunks(chunks):
-    df = pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
-    return df
+    return pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
 
 # -----------------------------
-# Streamlit App Interface
+# Streamlit UI
 # -----------------------------
 
 st.set_page_config(page_title="LLM Optimization Checker", layout="wide")
-st.title("🔍 LLM Optimization Checker")
+st.title("🧠 LLM Optimization & Content Analyzer")
 
-url_input = st.text_input("Enter a webpage URL to analyze:")
+input_mode = st.selectbox("Select Input Method", ["Webpage URL", "Upload .txt File", "Upload .html File", "Paste HTML Code", "Direct Text Input"])
+soup = None
 
-if st.button("Analyze"):
-    if url_input:
-        with st.spinner("Fetching and analyzing content..."):
-            soup = fetch_url_content(url_input)
-            if soup:
-                chunks = extract_chunks(soup)
+if input_mode == "Webpage URL":
+    url = st.text_input("Enter URL:")
+    if st.button("Analyze") and url:
+        soup = fetch_url_content(url)
 
-                st.subheader("🔎 Key Takeaways")
-                for i, item in enumerate(get_key_takeaways(chunks), 1):
-                    st.markdown(f"**{i}.** {item['text']}")
-                    st.markdown(f"**LLM Tip:** {item['llm_tip']}")
+elif input_mode == "Upload .txt File":
+    txt_file = st.file_uploader("Upload .txt", type=["txt"])
+    if txt_file:
+        content = txt_file.read().decode("utf-8")
+        soup, _ = extract_text_from_html(f"<p>{content}</p>")
 
-                st.subheader("⚠️ Flagged Chunks (Quality Score < 70)")
-                flagged_df = export_flagged_chunks(chunks)
-                if not flagged_df.empty:
-                    st.dataframe(flagged_df)
-                else:
-                    st.success("No low-quality chunks found! ✅")
+elif input_mode == "Upload .html File":
+    html_file = st.file_uploader("Upload .html", type=["html"])
+    if html_file:
+        html = html_file.read().decode("utf-8")
+        soup, _ = extract_text_from_html(html)
 
-                st.subheader("📚 Extracted Glossary Terms")
-                glossary = extract_glossary(chunks)
-                if glossary:
-                    st.table(glossary)
-                else:
-                    st.info("No glossary terms found.")
+elif input_mode == "Paste HTML Code":
+    raw_html = st.text_area("Paste full HTML code here:")
+    if raw_html:
+        soup, _ = extract_text_from_html(raw_html)
 
-    else:
-        st.warning("Please enter a valid URL.")
+elif input_mode == "Direct Text Input":
+    plain_text = st.text_area("Paste plain content here:")
+    if plain_text:
+        soup, _ = extract_text_from_html(f"<p>{plain_text}</p>")
+
+# -----------------------------
+# Run Analysis & Display
+# -----------------------------
+
+if soup:
+    with st.spinner("Analyzing content..."):
+        chunks = extract_chunks(soup)
+
+        st.subheader("📌 Key Takeaways")
+        top_chunks = get_key_takeaways(chunks)
+        for i, item in enumerate(top_chunks, 1):
+            st.markdown(f"**{i}. {item['text']}**")
+            st.markdown(f"> 💡 **LLM Tip:** {item['llm_tip']}")
+
+        st.subheader("⚠️ Flagged Chunks (Low Quality Score)")
+        flagged = export_flagged_chunks(chunks)
+        if not flagged.empty:
+            st.dataframe(flagged)
+        else:
+            st.success("No low-quality content detected.")
+
+        st.subheader("📘 Glossary Terms (Detected Definitions)")
+        glossary = extract_glossary(chunks)
+        if glossary:
+            st.table(glossary)
+        else:
+            st.info("No glossary terms were identified.")
