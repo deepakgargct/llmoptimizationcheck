@@ -99,7 +99,7 @@ def generate_llm_tip(text):
 
 def extract_glossary(chunks):
     glossary = []
-    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<definition>.+?)\\.")
+    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<definition>.+?)\.")
     for chunk in chunks:
         matches = pattern.findall(chunk['text'])
         for match in matches:
@@ -113,7 +113,3 @@ def get_key_takeaways(chunks, top_n=3):
 def export_flagged_chunks(chunks):
     df = pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
     return df
-'''
-
-with open("/mnt/data/genai_optimizer_app.py", "w") as f:
-    f.write(corrected_script)
