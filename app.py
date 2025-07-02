@@ -5,7 +5,8 @@ from bs4 import BeautifulSoup
 from textstat import flesch_reading_ease
 from nltk.corpus import stopwords
 from nltk.data import find
-import spacy, spacy.cli
+import subprocess
+import spacy
 
 # -------------------- 1. SETUP --------------------
 def ensure_nltk_data():
@@ -19,7 +20,7 @@ def ensure_spacy_model():
     try:
         return spacy.load("en_core_web_sm")
     except OSError:
-        spacy.cli.download("en_core_web_sm")
+        subprocess.run(["python3", "-m", "spacy", "download", "en_core_web_sm", "--user"])
         return spacy.load("en_core_web_sm")
 
 ensure_nltk_data()
