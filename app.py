@@ -1,29 +1,30 @@
+# app.py
 import streamlit as st
-import requests
+import requests, re, nltk, tiktoken, pandas as pd, matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 from textstat import flesch_reading_ease
 from nltk.corpus import stopwords
-import nltk
-import tiktoken
-import pandas as pd
-import re
+from nltk.data import find
+import spacy, spacy.cli
 
-# --- One-time NLTK setup ---
+# -------------------- 1. SETUP --------------------
 def ensure_nltk_data():
-    from nltk.data import find
+    for pkg in ["punkt", "stopwords"]:
+        try:
+            find(f"tokenizers/{pkg}" if pkg == "punkt" else f"corpora/{pkg}")
+        except LookupError:
+            nltk.download(pkg)
+
+def ensure_spacy_model():
     try:
-        find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
-    try:
-        find('corpora/stopwords')
-    except LookupError:
-        nltk.download('stopwords')
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        spacy.cli.download("en_core_web_sm")
+        return spacy.load("en_core_web_sm")
 
 ensure_nltk_data()
-
-stop_words = set(stopwords.words('english'))
+nlp = ensure_spacy_model()
+stop_words = set(stopwords.words("english"))
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
 AMBIGUOUS_PHRASES = {
@@ -40,158 +41,177 @@ AMBIGUOUS_PHRASES = {
     "it could be argued": "Use clear evidence or expert quotes."
 }
 
-EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
+EXCLUDED_TAGS = ["header", "footer", "nav", "aside"]
 
-# --- Functions ---
+# -------------------- 2. FUNCTIONS --------------------
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
-def analyze_readability(text):
+def readability_score(text):
     try:
         return flesch_reading_ease(text)
     except:
         return 0.0
 
-def extract_text_from_html(html_code):
-    soup = BeautifulSoup(html_code, 'html.parser')
-    for tag in EXCLUDED_TAGS:
-        for element in soup.find_all(tag):
-            element.decompose()
-    return soup, soup.get_text()
-
 def fetch_url_content(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        return soup
+        r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        r.raise_for_status()
+        return BeautifulSoup(r.content, "html.parser")
     except Exception as e:
         st.error(f"Error fetching URL: {e}")
         return None
 
+def clean_soup(html):
+    soup = (
+        html if isinstance(html, BeautifulSoup)
+        else BeautifulSoup(html, "html.parser")
+    )
+    for tag in EXCLUDED_TAGS:
+        for el in soup.find_all(tag):
+            el.decompose()
+    return soup
+
 def generate_llm_tip(text):
     tips = []
-    lower_text = text.lower()
-    if "?" in text or "faq" in lower_text:
-        tips.append("Wrap this section with FAQ schema.")
-    if any(keyword in lower_text for keyword in ["how to", "step-by-step", "guide", "steps"]):
-        tips.append("Consider using HowTo schema markup.")
-    if "vs" in lower_text or "compare" in lower_text or "comparison" in lower_text:
-        tips.append("This section could benefit from a Comparison schema.")
+    t = text.lower()
+    if "?" in text or "faq" in t:
+        tips.append("Wrap with FAQ schema.")
+    if any(k in t for k in ["how to", "step-by-step", "guide", "steps"]):
+        tips.append("Use HowTo schema.")
+    if any(k in t for k in ["vs", " compare", "comparison"]):
+        tips.append("Use Comparison schema.")
     if len(text.split()) > 150:
-        tips.append("Split into smaller paragraphs to improve LLM retrieval.")
+        tips.append("Split into smaller paragraphs.")
     if not tips:
-        tips.append("Use clearer structure or schema markup for better LLM optimization.")
+        tips.append("Use clearer structure or schema markup.")
     return " ".join(tips)
 
 def extract_chunks(soup):
     seen = set()
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
-        text = tag.get_text(strip=True)
-        if len(text.split()) > 30:
-            clean_text = re.sub(r'\s+', ' ', text.strip())
-            if clean_text in seen:
-                continue
-            seen.add(clean_text)
-
-            tokens = count_tokens(clean_text)
-            readability = analyze_readability(clean_text)
-            ambiguous_hits = [p for p in AMBIGUOUS_PHRASES if p in clean_text.lower()]
-            quality_score = 100
-            if tokens > 300:
-                quality_score -= 15
-            if readability < 60:
-                quality_score -= 15
-            if ambiguous_hits:
-                quality_score -= 10 * len(ambiguous_hits)
-            chunks.append({
-                'text': clean_text[:300] + '...' if len(clean_text) > 300 else clean_text,
-                'token_count': tokens,
-                'readability': readability,
-                'ambiguous_phrases': ambiguous_hits,
-                'quality_score': max(0, quality_score),
-                'llm_tip': generate_llm_tip(clean_text)
-            })
+        raw = tag.get_text(" ", strip=True)
+        if len(raw.split()) < 30:
+            continue
+        txt = re.sub(r"\s+", " ", raw.strip())
+        if txt in seen:
+            continue
+        seen.add(txt)
+        tokens = count_tokens(txt)
+        read_score = readability_score(txt)
+        ambiguous = [p for p in AMBIGUOUS_PHRASES if p in txt.lower()]
+        quality = 100 - (15 if tokens > 300 else 0) - (15 if read_score < 60 else 0) - 10 * len(ambiguous)
+        chunks.append({
+            "text": txt[:300] + "…" if len(txt) > 300 else txt,
+            "token_count": tokens,
+            "readability": read_score,
+            "ambiguous_phrases": ambiguous,
+            "quality_score": max(0, quality),
+            "llm_tip": generate_llm_tip(txt)
+        })
     return chunks
 
 def extract_glossary(chunks):
-    glossary = []
-    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<definition>.+?)\.")
-    for chunk in chunks:
-        matches = pattern.findall(chunk['text'])
-        for match in matches:
-            glossary.append({'term': match[0].strip(), 'definition': match[2].strip()})
-    return glossary
+    pat = re.compile(r"(?P<term>[A-Z][A-Za-z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<def>.+?)\.")
+    gloss = []
+    for c in chunks:
+        for term, _, definition in pat.findall(c["text"]):
+            gloss.append({"term": term.strip(), "definition": definition.strip()})
+    return gloss
 
-def get_key_takeaways(chunks, top_n=3):
-    sorted_chunks = sorted(chunks, key=lambda x: x['quality_score'], reverse=True)
-    return sorted_chunks[:top_n]
+def extract_entities(chunks):
+    ents = []
+    for c in chunks:
+        doc = nlp(c["text"])
+        for ent in doc.ents:
+            ents.append((ent.text, ent.label_))
+    seen = set(); unique = []
+    for e, l in ents:
+        key = (e, l)
+        if key not in seen:
+            seen.add(key)
+            unique.append({"Entity": e, "Label": l})
+    return unique
 
-def export_flagged_chunks(chunks):
-    return pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
+def show_quality_pie_chart(chunks):
+    high = sum(1 for c in chunks if c["quality_score"] >= 85)
+    med = sum(1 for c in chunks if 70 <= c["quality_score"] < 85)
+    low = sum(1 for c in chunks if c["quality_score"] < 70)
+    labels, sizes = ["High (≥85)", "Medium (70–84)", "Low (<70)"], [high, med, low]
+    fig, ax = plt.subplots()
+    ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=140)
+    ax.axis("equal")
+    st.pyplot(fig)
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
+def color_for_score(score):
+    if score >= 85: return "✅"
+    elif score >= 70: return "🟡"
+    else: return "🔴"
 
-st.set_page_config(page_title="LLM Optimization Checker", layout="wide")
+# -------------------- 3. STREAMLIT APP --------------------
+st.set_page_config("LLM Optimizer", layout="wide")
 st.title("🧠 LLM Optimization & Content Analyzer")
 
-input_mode = st.selectbox("Select Input Method", ["Webpage URL", "Upload .txt File", "Upload .html File", "Paste HTML Code", "Direct Text Input"])
+mode = st.selectbox("Choose Input Method", [
+    "Webpage URL", "Upload .txt File", "Upload .html File",
+    "Paste HTML Code", "Direct Text Input"
+])
+
 soup = None
 
-if input_mode == "Webpage URL":
+if mode == "Webpage URL":
     url = st.text_input("Enter URL:")
     if st.button("Analyze") and url:
         soup = fetch_url_content(url)
 
-elif input_mode == "Upload .txt File":
-    txt_file = st.file_uploader("Upload .txt", type=["txt"])
-    if txt_file:
-        content = txt_file.read().decode("utf-8")
-        soup, _ = extract_text_from_html(f"<p>{content}</p>")
+elif mode == "Upload .txt File":
+    f = st.file_uploader("Upload .txt", type=["txt"])
+    if f: soup = clean_soup(f"<p>{f.read().decode('utf-8')}</p>")
 
-elif input_mode == "Upload .html File":
-    html_file = st.file_uploader("Upload .html", type=["html"])
-    if html_file:
-        html = html_file.read().decode("utf-8")
-        soup, _ = extract_text_from_html(html)
+elif mode == "Upload .html File":
+    f = st.file_uploader("Upload .html", type=["html", "htm"])
+    if f: soup = clean_soup(f.read().decode("utf-8"))
 
-elif input_mode == "Paste HTML Code":
-    raw_html = st.text_area("Paste full HTML code here:")
-    if raw_html:
-        soup, _ = extract_text_from_html(raw_html)
+elif mode == "Paste HTML Code":
+    code = st.text_area("Paste full HTML:")
+    if code: soup = clean_soup(code)
 
-elif input_mode == "Direct Text Input":
-    plain_text = st.text_area("Paste plain content here:")
-    if plain_text:
-        soup, _ = extract_text_from_html(f"<p>{plain_text}</p>")
+elif mode == "Direct Text Input":
+    txt = st.text_area("Paste plain text:")
+    if txt: soup = clean_soup(f"<p>{txt}</p>")
 
-# -----------------------------
-# Run Analysis & Display
-# -----------------------------
-
+# -------------------- 4. OUTPUT --------------------
 if soup:
-    with st.spinner("Analyzing content..."):
+    with st.spinner("Analyzing content…"):
         chunks = extract_chunks(soup)
-
-        st.subheader("📌 Key Takeaways")
-        top_chunks = get_key_takeaways(chunks)
-        for i, item in enumerate(top_chunks, 1):
-            st.markdown(f"**{i}. {item['text']}**")
-            st.markdown(f"> 💡 **LLM Tip:** {item['llm_tip']}")
-
-        st.subheader("⚠️ Flagged Chunks (Low Quality Score)")
-        flagged = export_flagged_chunks(chunks)
-        if not flagged.empty:
-            st.dataframe(flagged)
-        else:
-            st.success("No low-quality content detected.")
-
-        st.subheader("📘 Glossary Terms (Detected Definitions)")
         glossary = extract_glossary(chunks)
-        if glossary:
-            st.table(glossary)
-        else:
-            st.info("No glossary terms were identified.")
+        entities = extract_entities(chunks)
+
+    st.subheader("📌 Key Takeaways")
+    for i, c in enumerate(sorted(chunks, key=lambda x: x["quality_score"], reverse=True)[:3], 1):
+        st.markdown(f"**{i}. {c['text']}**")
+        st.markdown(f"> 💡 **LLM Tip:** {c['llm_tip']}")
+
+    st.subheader("⚠️ Flagged Chunks")
+    flagged = [c for c in chunks if c["quality_score"] < 70]
+    st.dataframe(pd.DataFrame(flagged)) if flagged else st.success("No low-quality content.")
+
+    st.subheader("📘 Glossary Terms")
+    st.table(glossary) if glossary else st.info("No glossary terms found.")
+
+    st.subheader("🗂 Named Entities")
+    st.table(entities) if entities else st.info("No named entities found.")
+
+    st.subheader("📊 Quality Score Distribution")
+    show_quality_pie_chart(chunks)
+
+    st.subheader("🔍 Full Chunk Analysis")
+    for i, c in enumerate(chunks, 1):
+        with st.expander(f"Chunk {i}: {c['text'][:60]}..."):
+            st.markdown(f"**Text:** {c['text']}")
+            st.markdown(f"**Token Count:** {c['token_count']}")
+            st.markdown(f"**Readability (Flesch Score):** {c['readability']:.2f}")
+            st.markdown(f"**Ambiguous Phrases:** {', '.join(c['ambiguous_phrases']) if c['ambiguous_phrases'] else 'None'}")
+            st.markdown(f"**Quality Score:** {color_for_score(c['quality_score'])} {c['quality_score']} / 100")
+            st.markdown(f"**LLM Tip:** {c['llm_tip']}")
