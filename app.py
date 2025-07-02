@@ -13,8 +13,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 
-nltk.download('punkt')
-nltk.download('stopwords')
+# One-time NLTK data check
+def ensure_nltk_data():
+    from nltk.data import find
+    try:
+        find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+
+    try:
+        find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+
+ensure_nltk_data()
 
 stop_words = set(stopwords.words('english'))
 tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -113,3 +125,41 @@ def get_key_takeaways(chunks, top_n=3):
 def export_flagged_chunks(chunks):
     df = pd.DataFrame([c for c in chunks if c['quality_score'] < 70])
     return df
+
+# -----------------------------
+# Streamlit App Interface
+# -----------------------------
+
+st.set_page_config(page_title="LLM Optimization Checker", layout="wide")
+st.title("🔍 LLM Optimization Checker")
+
+url_input = st.text_input("Enter a webpage URL to analyze:")
+
+if st.button("Analyze"):
+    if url_input:
+        with st.spinner("Fetching and analyzing content..."):
+            soup = fetch_url_content(url_input)
+            if soup:
+                chunks = extract_chunks(soup)
+
+                st.subheader("🔎 Key Takeaways")
+                for i, item in enumerate(get_key_takeaways(chunks), 1):
+                    st.markdown(f"**{i}.** {item['text']}")
+                    st.markdown(f"**LLM Tip:** {item['llm_tip']}")
+
+                st.subheader("⚠️ Flagged Chunks (Quality Score < 70)")
+                flagged_df = export_flagged_chunks(chunks)
+                if not flagged_df.empty:
+                    st.dataframe(flagged_df)
+                else:
+                    st.success("No low-quality chunks found! ✅")
+
+                st.subheader("📚 Extracted Glossary Terms")
+                glossary = extract_glossary(chunks)
+                if glossary:
+                    st.table(glossary)
+                else:
+                    st.info("No glossary terms found.")
+
+    else:
+        st.warning("Please enter a valid URL.")
