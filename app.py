@@ -1,225 +1,369 @@
-# Full app.py code is lengthy, so I’ll provide a Gist or downloadable version.
-# Here's a link you can use to download the full app.py:
-
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+import requests, re, nltk, subprocess, spacy, json, time
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from nltk.tokenize import sent_tokenize
+from bs4 import BeautifulSoup
+from textstat import flesch_reading_ease
 from nltk.corpus import stopwords
-import nltk
-import re
+from nltk.data import find
+import matplotlib.pyplot as plt
 import tiktoken
-import json
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
 
-nltk.download('punkt')
-nltk.download('stopwords')
+# Ensure NLTK Data
+def ensure_nltk_data():
+    for pkg in ["punkt", "stopwords"]:
+        try:
+            find(f"tokenizers/{pkg}" if pkg == "punkt" else f"corpora/{pkg}")
+        except LookupError:
+            nltk.download(pkg)
 
-# Constants
-DANDELION_TOKEN = st.secrets["DANDELION_API_KEY"]
-tokenizer = tiktoken.get_encoding("cl100k_base")
+ensure_nltk_data()
 stop_words = set(stopwords.words("english"))
-EXCLUDED_TAGS = ['header', 'footer', 'nav', 'aside']
 
+# Ensure spaCy Model
+def ensure_spacy_model():
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+        return spacy.load("en_core_web_sm")
+
+nlp = ensure_spacy_model()
+
+# Tokenizer
+tokenizer = tiktoken.get_encoding("cl100k_base")
+
+# Ambiguous phrases
 AMBIGUOUS_PHRASES = {
-    "click here": "Consider using descriptive anchor text like 'View pricing plans'.",
-    "learn more": "Be more specific, e.g., 'Learn about AI SEO strategy'.",
-    "read more": "Try 'Read the full case study' or 'Explore benefits'.",
+    "click here": "Use descriptive anchor text like 'Download SEO checklist'.",
+    "learn more": "Specify the subject, e.g., 'Learn more about LLM optimization'.",
+    "read more": "Clarify the content, e.g., 'Read more about AI best practices'.",
     "overview": "Use topic-specific phrasing like 'SEO strategy breakdown'.",
-    "details": "Say 'Implementation checklist' or 'Feature breakdown'.",
-    "more info": "Specify what info is available, like 'FAQ on billing'.",
-    "start now": "Clarify with action, e.g., 'Start your free SEO audit now'.",
-    "this article": "Use the actual article title for clarity.",
-    "some believe": "Attribute to a source or remove vague phrasing.",
-    "it could be argued": "Specify who argues or rephrase for clarity."
+    "details": "Replace with specific terms like 'technical implementation details'.",
 }
+EXCLUDED_TAGS = ["header", "footer", "nav", "aside"]
 
 def count_tokens(text):
     return len(tokenizer.encode(text))
 
-def analyze_readability(text):
+def readability_score(text):
     try:
-        import textstat
-        return textstat.flesch_reading_ease(text)
+        return flesch_reading_ease(text)
     except:
         return 0.0
 
 def fetch_url_content(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=10)
-        if 'text/html' not in res.headers.get('Content-Type', ''):
-            return None
-        return BeautifulSoup(res.text, 'html.parser')
-    except:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r.raise_for_status()
+        return BeautifulSoup(r.content, "html.parser")
+    except Exception as e:
+        st.error(f"Error fetching URL: {e}")
         return None
 
-def remove_duplicates(chunks):
-    seen = set()
-    filtered = []
-    for c in chunks:
-        if c['text'] not in seen:
-            filtered.append(c)
-            seen.add(c['text'])
-    return filtered
+def clean_soup(html):
+    soup = (
+        html if isinstance(html, BeautifulSoup)
+        else BeautifulSoup(html, "html.parser")
+    )
+    for tag in EXCLUDED_TAGS:
+        for el in soup.find_all(tag):
+            el.decompose()
+    return soup
+
+def generate_llm_tip(text):
+    tips = []
+    t = text.lower()
+    if "?" in text or "faq" in t:
+        tips.append("Wrap with FAQ schema.")
+    if any(k in t for k in ["how to", "step-by-step", "guide", "steps"]):
+        tips.append("Use HowTo schema.")
+    if any(k in t for k in ["vs", " compare", "comparison"]):
+        tips.append("Use Comparison schema.")
+    if len(text.split()) > 150:
+        tips.append("Split into smaller paragraphs.")
+    if not tips:
+        tips.append("Use clearer structure or schema markup.")
+    return " ".join(tips)
 
 def extract_chunks(soup):
-    for tag in EXCLUDED_TAGS:
-        for elem in soup.find_all(tag):
-            elem.decompose()
-
+    seen = set()
     chunks = []
     for tag in soup.find_all(['section', 'article', 'div', 'p']):
-        text = tag.get_text(strip=True)
-        if len(text.split()) > 30:
-            tokens = count_tokens(text)
-            readability = analyze_readability(text)
-            ambiguous = [phrase for phrase in AMBIGUOUS_PHRASES if phrase in text.lower()]
-            suggestions = [f⚠️ Ambiguous: '{p}' → {AMBIGUOUS_PHRASES[p]}" for p in ambiguous]
+        raw = tag.get_text(" ", strip=True)
+        if len(raw.split()) < 30:
+            continue
+        txt = re.sub(r"\s+", " ", raw.strip())
+        if txt in seen:
+            continue
+        seen.add(txt)
+        tokens = count_tokens(txt)
+        read_score = readability_score(txt)
+        ambiguous = [p for p in AMBIGUOUS_PHRASES if p in txt.lower()]
+        quality = 100 - (15 if tokens > 300 else 0) - (15 if read_score < 60 else 0) - 10 * len(ambiguous)
+        chunks.append({
+            "text": txt[:300] + "…" if len(txt) > 300 else txt,
+            "token_count": tokens,
+            "readability": read_score,
+            "ambiguous_phrases": ambiguous,
+            "quality_score": max(0, quality),
+            "llm_tip": generate_llm_tip(txt)
+        })
+    return chunks
+def extract_glossary(chunks):
+    pat = re.compile(r"(?P<term>[A-Z][A-Za-z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<def>.+?)\.")
+    gloss = []
+    for c in chunks:
+        for term, _, definition in pat.findall(c["text"]):
+            gloss.append({"term": term.strip(), "definition": definition.strip()})
+    return gloss
 
-            score = 100
-            if tokens > 300: score -= 10
-            if readability < 60: score -= 10
-            if ambiguous: score -= 10 * len(ambiguous)
-
-            chunks.append({
-                'text': text[:400] + '...' if len(text) > 400 else text,
-                'token_count': tokens,
-                'readability': readability,
-                'ambiguous_phrases': ambiguous,
-                'quality_score': max(score, 0),
-                'suggestions': suggestions
-            })
-    return remove_duplicates(chunks)
+def extract_entities_spacy(chunks):
+    ents = []
+    for c in chunks:
+        doc = nlp(c["text"])
+        for ent in doc.ents:
+            ents.append((ent.text, ent.label_))
+    seen = set(); unique = []
+    for e, l in ents:
+        key = (e, l)
+        if key not in seen:
+            seen.add(key)
+            unique.append({"Entity": e, "Label": l})
+    return unique
 
 def extract_entities_dandelion(text):
     try:
-        url = "https://api.dandelion.eu/datatxt/nex/v1/"
-        payload = {
-            'text': text,
-            'lang': 'en',
-            'token': DANDELION_TOKEN
-        }
-        response = requests.post(url, data=payload).json()
-        return [e['spot'] for e in response.get("annotations", [])]
-    except:
+        response = requests.get(
+            "https://api.dandelion.eu/datatxt/nex/v1/",
+            params={
+                "text": text,
+                "lang": "en",
+                "token": st.secrets["dandelion"]["token"]
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        ents = [{"Entity": e["spot"], "Label": e["label"]} for e in data.get("annotations", [])]
+        return ents
+    except Exception as e:
         return []
 
-def extract_glossary(chunks):
-    glossary = []
-    pattern = re.compile(r"(?P<term>[A-Z][a-zA-Z0-9\- ]+?)\s+(is|means|refers to)\s+(?P<definition>.+?)\.")
-    for c in chunks:
-        matches = pattern.findall(c['text'])
-        for m in matches:
-            glossary.append({"term": m[0].strip(), "definition": m[2].strip()})
-    return glossary
+def extract_all_entities(chunks, method="spacy"):
+    ents = []
+    if method == "dandelion":
+        for c in chunks:
+            ents.extend(extract_entities_dandelion(c["text"]))
+    else:
+        ents = extract_entities_spacy(chunks)
+    return ents
 
-def get_key_takeaways(chunks, top=3):
-    return sorted(chunks, key=lambda x: x['quality_score'], reverse=True)[:top]
+def show_quality_pie_chart(chunks):
+    high = sum(1 for c in chunks if c["quality_score"] >= 85)
+    med = sum(1 for c in chunks if 70 <= c["quality_score"] < 85)
+    low = sum(1 for c in chunks if c["quality_score"] < 70)
+    labels, sizes = ["High (≥85)", "Medium (70–84)", "Low (<70)"], [high, med, low]
+    fig, ax = plt.subplots()
+    ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=140)
+    ax.axis("equal")
+    st.pyplot(fig)
 
-def generate_ai_tip(chunk):
-    tip = []
-    if chunk['readability'] < 60:
-        tip.append("💡 Improve sentence clarity and shorten paragraphs.")
-    if chunk['token_count'] > 300:
-        tip.append("💡 Split into smaller, focused sections (~200 tokens).")
-    if chunk['ambiguous_phrases']:
-        tip.append("💡 Replace vague terms with topic-specific language.")
-    return " ".join(tip)
+def color_for_score(score):
+    if score >= 85: return "✅"
+    elif score >= 70: return "🟡"
+    else: return "🔴"
+# -------------------- 3. STREAMLIT UI --------------------
+st.set_page_config("LLM Optimizer", layout="wide")
+st.title("🧠 GenAI Optimization & Visibility Tool")
+tabs = st.tabs(["🔍 Content Analyzer", "📡 AI Search Visibility Checker"])
 
-def suggest_schema_types(text):
-    lower = text.lower()
-    if "event" in lower: return "Event schema"
-    elif "review" in lower: return "Review schema"
-    elif "product" in lower: return "Product schema"
-    elif "faq" in lower: return "FAQPage schema"
-    return "Article schema"
+# -------------------- Tab 1: Content Analyzer --------------------
+with tabs[0]:
+    mode = st.selectbox("Choose Input Method", [
+        "Webpage URL", "Upload .txt File", "Upload .html File",
+        "Paste HTML Code", "Direct Text Input"
+    ])
+    soup = None
 
-def dummy_brave_perplexity_check(text):
-    return "Likely Appears ✅" if "seo" in text.lower() else "Not Found ❌"
-
-# Streamlit UI
-st.set_page_config(page_title="GenAI Optimization Checker", layout="wide")
-st.title("GenAI Optimization Checker")
-
-with st.sidebar:
-    st.markdown("### 🧾 Content Input")
-    method = st.radio("Choose input method", ["URL", "HTML file", "Raw HTML", ".txt file"])
-    html = ""
-
-    if method == "URL":
+    if mode == "Webpage URL":
         url = st.text_input("Enter URL:")
-        if st.button("Fetch"):
+        if st.button("Analyze") and url:
             soup = fetch_url_content(url)
-            html = soup.prettify() if soup else ""
-    elif method == "HTML file":
-        f = st.file_uploader("Upload HTML", type="html")
-        if f: html = f.read().decode("utf-8")
-    elif method == "Raw HTML":
-        html = st.text_area("Paste HTML:")
-    elif method == ".txt file":
-        f = st.file_uploader("Upload .txt", type="txt")
-        if f: html = f.read().decode("utf-8")
 
-if html:
-    soup = BeautifulSoup(html, "html.parser")
-    chunks = extract_chunks(soup)
+    elif mode == "Upload .txt File":
+        f = st.file_uploader("Upload .txt", type=["txt"])
+        if f: soup = clean_soup(f"<p>{f.read().decode('utf-8')}</p>")
 
-    tabs = st.tabs(["🧠 AI Analysis", "📚 Glossary", "📌 Takeaways", "📊 Visuals", "📤 Export"])
+    elif mode == "Upload .html File":
+        f = st.file_uploader("Upload .html", type=["html", "htm"])
+        if f: soup = clean_soup(f.read().decode("utf-8"))
 
-    with tabs[0]:
-        for i, c in enumerate(chunks):
-            st.markdown(f"### Chunk {i+1}")
-            st.markdown(c['text'])
-            st.markdown(f"**Tokens:** {c['token_count']} | **Readability:** {c['readability']:.2f} | **Score:** {c['quality_score']}%")
-            for s in c['suggestions']:
-                st.warning(s)
-            ai_tip = generate_ai_tip(c)
-            if ai_tip: st.info(f"🧠 LLM Tip: {ai_tip}")
-            schema_type = suggest_schema_types(c['text'])
-            st.markdown(f"📘 Suggested Schema: **{schema_type}**")
-            visibility = dummy_brave_perplexity_check(c['text'])
-            st.markdown(f"🔍 AI Search Visibility: **{visibility}**")
-            entities = extract_entities_dandelion(c['text'])
-            if entities:
-                st.markdown(f"🧾 Entities: {', '.join(set(entities))}")
+    elif mode == "Paste HTML Code":
+        code = st.text_area("Paste full HTML:")
+        if code: soup = clean_soup(code)
 
-    with tabs[1]:
-        st.subheader("📚 Glossary")
-        glossary = extract_glossary(chunks)
-        if glossary:
-            df = pd.DataFrame(glossary)
-            st.dataframe(df)
-        else:
-            st.info("No glossary entries found.")
+    elif mode == "Direct Text Input":
+        txt = st.text_area("Paste plain text:")
+        if txt: soup = clean_soup(f"<p>{txt}</p>")
 
-    with tabs[2]:
+    entity_method = st.radio("Entity Extraction Method", ["spaCy (Local)", "Dandelion API"], horizontal=True)
+
+    if soup:
+        with st.spinner("Analyzing content…"):
+            chunks = extract_chunks(soup)
+            glossary = extract_glossary(chunks)
+            entities = extract_all_entities(chunks, method="dandelion" if entity_method == "Dandelion API" else "spacy")
+
         st.subheader("📌 Key Takeaways")
-        for i, c in enumerate(get_key_takeaways(chunks)):
-            st.markdown(f"**Takeaway {i+1}:** {c['text']}")
+        for i, c in enumerate(sorted(chunks, key=lambda x: x["quality_score"], reverse=True)[:3], 1):
+            st.markdown(f"**{i}. {c['text']}**")
+            st.markdown(f"> 💡 **LLM Tip:** {c['llm_tip']}")
 
-    with tabs[3]:
-        df = pd.DataFrame(chunks)
-        st.subheader("📊 Score Distribution")
-        fig1, ax1 = plt.subplots()
-        sns.histplot(df['quality_score'], ax=ax1, color='skyblue')
-        st.pyplot(fig1)
-
-        st.subheader("📊 Token Count vs Readability")
-        fig2, ax2 = plt.subplots()
-        sns.scatterplot(data=df, x="token_count", y="readability", ax=ax2)
-        st.pyplot(fig2)
-
-    with tabs[4]:
-        flagged = df[df['quality_score'] < 70]
-        if not flagged.empty:
-            st.dataframe(flagged)
-            csv = flagged.to_csv(index=False).encode()
-            st.download_button("📥 Download CSV", csv, "flagged_chunks.csv", "text/csv")
+        st.subheader("⚠️ Flagged Chunks")
+        flagged = [c for c in chunks if c["quality_score"] < 70]
+        if flagged:
+            st.dataframe(pd.DataFrame(flagged))
         else:
-            st.success("No low-scoring chunks found!")
+            st.success("No low-quality content.")
 
-st.caption("⚡ Optimized for AI search engines and LLM retrieval readiness.")
+        st.subheader("📘 Glossary Terms")
+        if glossary:
+            st.dataframe(pd.DataFrame(glossary))
+        else:
+            st.info("No glossary terms found.")
+
+        st.subheader("🗂 Named Entities")
+        if entities:
+            st.dataframe(pd.DataFrame(entities))
+        else:
+            st.info("No named entities found.")
+
+        st.subheader("📊 Quality Score Distribution")
+        show_quality_pie_chart(chunks)
+
+        st.subheader("🔍 Full Chunk Analysis")
+        for i, c in enumerate(chunks, 1):
+            with st.expander(f"Chunk {i}: {c['text'][:60]}..."):
+                st.markdown(f"**Text:** {c['text']}")
+                st.markdown(f"**Token Count:** {c['token_count']}")
+                st.markdown(f"**Readability (Flesch Score):** {c['readability']:.2f}")
+                st.markdown(f"**Ambiguous Phrases:** {', '.join(c['ambiguous_phrases']) if c['ambiguous_phrases'] else 'None'}")
+                st.markdown(f"**Quality Score:** {color_for_score(c['quality_score'])} {c['quality_score']} / 100")
+                st.markdown(f"**LLM Tip:** {c['llm_tip']}")
+# -------------------- Tab 2: AI Search Visibility Checker --------------------
+with tabs[1]:
+    st.header("📡 AI Search Visibility Checker")
+
+    keyword_input = st.text_area("Enter keyword(s), one per line", key="keywords_ai")
+    domain_input = st.text_input("Enter your domain or brand (e.g., otolawn.com)", key="domain_ai")
+
+    def check_brave_summary(keyword, domain):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            url = f"https://search.brave.com/search?q={keyword.replace(' ', '+')}"
+            r = requests.get(url, headers=headers)
+            soup = BeautifulSoup(r.text, "html.parser")
+            summary = soup.find("div", class_="snippet-summary")
+            if summary:
+                text = summary.get_text(" ", strip=True)
+                mentioned = domain.lower() in text.lower()
+                score = 50 + (50 if mentioned else 0)
+                return {
+                    "Keyword": keyword,
+                    "Source": "Brave",
+                    "AI Overview": "Yes",
+                    "Domain Mentioned": "Yes" if mentioned else "No",
+                    "Summary": text,
+                    "Visibility Score": score
+                }
+            else:
+                return {
+                    "Keyword": keyword,
+                    "Source": "Brave",
+                    "AI Overview": "No",
+                    "Domain Mentioned": "No",
+                    "Summary": "-",
+                    "Visibility Score": 0
+                }
+        except Exception as e:
+            return {
+                "Keyword": keyword,
+                "Source": "Brave",
+                "AI Overview": "Error",
+                "Domain Mentioned": "-",
+                "Summary": f"Error: {str(e)}",
+                "Visibility Score": 0
+            }
+
+    def check_perplexity_summary(keyword, domain):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            url = f"https://www.perplexity.ai/search?q={keyword.replace(' ', '%20')}"
+            r = requests.get(url, headers=headers)
+            soup = BeautifulSoup(r.text, "html.parser")
+            answers = soup.find_all("div", class_=re.compile("answer"))
+            for a in answers:
+                text = a.get_text(" ", strip=True)
+                if keyword.lower() in text.lower():
+                    mentioned = domain.lower() in text.lower()
+                    score = 50 + (50 if mentioned else 0)
+                    return {
+                        "Keyword": keyword,
+                        "Source": "Perplexity",
+                        "AI Overview": "Yes",
+                        "Domain Mentioned": "Yes" if mentioned else "No",
+                        "Summary": text[:300] + "…" if len(text) > 300 else text,
+                        "Visibility Score": score
+                    }
+            return {
+                "Keyword": keyword,
+                "Source": "Perplexity",
+                "AI Overview": "No",
+                "Domain Mentioned": "No",
+                "Summary": "-",
+                "Visibility Score": 0
+            }
+        except Exception as e:
+            return {
+                "Keyword": keyword,
+                "Source": "Perplexity",
+                "AI Overview": "Error",
+                "Domain Mentioned": "-",
+                "Summary": f"Error: {str(e)}",
+                "Visibility Score": 0
+            }
+
+    if st.button("Check AI Visibility") and keyword_input and domain_input:
+        with st.spinner("Checking visibility across Brave and Perplexity..."):
+            keywords = [k.strip() for k in keyword_input.splitlines() if k.strip()]
+            results = []
+
+            for kw in keywords:
+                results.append(check_brave_summary(kw, domain_input))
+                results.append(check_perplexity_summary(kw, domain_input))
+
+            df = pd.DataFrame(results)
+
+            st.subheader("🧾 Results")
+            st.dataframe(df)
+
+            avg_score = df.groupby("Keyword")["Visibility Score"].mean().reset_index()
+            avg_score.columns = ["Keyword", "Avg Visibility Score"]
+            st.subheader("📈 Ranking by Keyword Visibility")
+            st.dataframe(avg_score.sort_values("Avg Visibility Score", ascending=False))
+
+            st.download_button(
+                label="📥 Download Full Results as CSV",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="ai_visibility_results.csv",
+                mime="text/csv"
+            )
+
+            st.download_button(
+                label="📥 Download Ranking Scores as CSV",
+                data=avg_score.to_csv(index=False).encode("utf-8"),
+                file_name="keyword_visibility_scores.csv",
+                mime="text/csv"
+            )
