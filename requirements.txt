@@ -7,3 +7,4 @@ textstat>=0.7.3
 pandas>=2.2.2
 matplotlib>=3.8.4
 nltk>=3.8.1
+TfidfVectorizer
