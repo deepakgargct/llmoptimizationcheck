@@ -263,22 +263,17 @@ with tabs[1]:
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             url = f"https://search.brave.com/search?q={keyword.replace(' ', '+')}"
-            r = requests.get(url, headers=headers)
+            r = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            summary = soup.find("div", class_="snippet-summary")
-            if summary:
-                text = summary.get_text(" ", strip=True)
-                mentioned = domain.lower() in text.lower()
-                score = 50 + (50 if mentioned else 0)
-                return {
-                    "Keyword": keyword,
-                    "Source": "Brave",
-                    "AI Overview": "Yes",
-                    "Domain Mentioned": "Yes" if mentioned else "No",
-                    "Summary": text,
-                    "Visibility Score": score
-                }
-            else:
+            # Try multiple possible summary containers
+            summary = (
+                soup.find("div", class_="snippet-summary") or
+                soup.find("div", class_=re.compile("ai-overview|snippet|summary", re.I))
+            )
+            if not summary:
+                # Try to show a part of the HTML for debugging if summary not found
+                debug_html = soup.prettify()[:2000]
+                st.info(f"Brave - No summary found. HTML snippet:\n\n{debug_html}")
                 return {
                     "Keyword": keyword,
                     "Source": "Brave",
@@ -287,7 +282,19 @@ with tabs[1]:
                     "Summary": "-",
                     "Visibility Score": 0
                 }
+            text = summary.get_text(" ", strip=True)
+            mentioned = domain.lower() in text.lower()
+            score = 50 + (50 if mentioned else 0)
+            return {
+                "Keyword": keyword,
+                "Source": "Brave",
+                "AI Overview": "Yes",
+                "Domain Mentioned": "Yes" if mentioned else "No",
+                "Summary": text,
+                "Visibility Score": score
+            }
         except Exception as e:
+            st.error(f"Brave error for '{keyword}': {e}")
             return {
                 "Keyword": keyword,
                 "Source": "Brave",
@@ -301,14 +308,17 @@ with tabs[1]:
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             url = f"https://www.perplexity.ai/search?q={keyword.replace(' ', '%20')}"
-            r = requests.get(url, headers=headers)
+            r = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            answers = soup.find_all("div", class_=re.compile("answer"))
+            # Try multiple possible containers
+            answers = soup.find_all("div", class_=re.compile("answer|ai-overview|snippet|summary", re.I))
+            found = False
             for a in answers:
                 text = a.get_text(" ", strip=True)
                 if keyword.lower() in text.lower():
                     mentioned = domain.lower() in text.lower()
                     score = 50 + (50 if mentioned else 0)
+                    found = True
                     return {
                         "Keyword": keyword,
                         "Source": "Perplexity",
@@ -317,6 +327,9 @@ with tabs[1]:
                         "Summary": text[:300] + "…" if len(text) > 300 else text,
                         "Visibility Score": score
                     }
+            if not found:
+                debug_html = soup.prettify()[:2000]
+                st.info(f"Perplexity - No summary found. HTML snippet:\n\n{debug_html}")
             return {
                 "Keyword": keyword,
                 "Source": "Perplexity",
@@ -326,6 +339,7 @@ with tabs[1]:
                 "Visibility Score": 0
             }
         except Exception as e:
+            st.error(f"Perplexity error for '{keyword}': {e}")
             return {
                 "Keyword": keyword,
                 "Source": "Perplexity",
