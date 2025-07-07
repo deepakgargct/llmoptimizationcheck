@@ -6,3 +6,4 @@ matplotlib
 textstat
 nltk
 tiktoken
+spacy
