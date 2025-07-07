@@ -188,33 +188,49 @@ with tabs[0]:
             glossary = extract_glossary(chunks)
             entities = extract_entities(chunks)
 
-        st.subheader("📌 Key Takeaways")
-        for i, c in enumerate(sorted(chunks, key=lambda x: x["quality_score"], reverse=True)[:3], 1):
-            st.markdown(f"**{i}. {c['text']}**")
-            st.markdown(f"> 💡 **LLM Tip:** {c['llm_tip']}")
+     st.subheader("📌 Key Takeaways")
+top_chunks = sorted(chunks, key=lambda x: x["quality_score"], reverse=True)[:3]
+for i, c in enumerate(top_chunks, 1):
+    st.write(f"**{i}.**")
+    st.code(c["text"], language="text")
+    st.markdown(f"> 💡 **LLM Tip:** {c['llm_tip']}")
 
-        st.subheader("⚠️ Flagged Chunks")
-        flagged = [c for c in chunks if c["quality_score"] < 70]
-        st.dataframe(pd.DataFrame(flagged)) if flagged else st.success("No low-quality content.")
+st.subheader("⚠️ Flagged Chunks")
+flagged = [c for c in chunks if c["quality_score"] < 70]
+if flagged:
+    flagged_df = pd.DataFrame(flagged)
+    st.dataframe(flagged_df)
+else:
+    st.success("No low-quality content.")
 
-        st.subheader("📘 Glossary Terms")
-        st.table(glossary) if glossary else st.info("No glossary terms found.")
+st.subheader("📘 Glossary Terms")
+if glossary:
+    glossary_df = pd.DataFrame(glossary)
+    st.dataframe(glossary_df)
+else:
+    st.info("No glossary terms found.")
 
-        st.subheader("🗂 Named Entities")
-        st.table(entities) if entities else st.info("No named entities found.")
+st.subheader("🗂 Named Entities")
+if entities:
+    entities_df = pd.DataFrame(entities)
+    st.dataframe(entities_df)
+else:
+    st.info("No named entities found.")
 
-        st.subheader("📊 Quality Score Distribution")
-        show_quality_pie_chart(chunks)
+st.subheader("📊 Quality Score Distribution")
+show_quality_pie_chart(chunks)
 
-        st.subheader("🔍 Full Chunk Analysis")
-        for i, c in enumerate(chunks, 1):
-            with st.expander(f"Chunk {i}: {c['text'][:60]}..."):
-                st.markdown(f"**Text:** {c['text']}")
-                st.markdown(f"**Token Count:** {c['token_count']}")
-                st.markdown(f"**Readability (Flesch Score):** {c['readability']:.2f}")
-                st.markdown(f"**Ambiguous Phrases:** {', '.join(c['ambiguous_phrases']) if c['ambiguous_phrases'] else 'None'}")
-                st.markdown(f"**Quality Score:** {color_for_score(c['quality_score'])} {c['quality_score']} / 100")
-                st.markdown(f"**LLM Tip:** {c['llm_tip']}")
+st.subheader("🔍 Full Chunk Analysis")
+for i, c in enumerate(chunks, 1):
+    with st.expander(f"Chunk {i}: {c['text'][:60]}..."):
+        st.markdown("**Text:**")
+        st.code(c["text"], language="text")
+        st.write(f"**Token Count:** {c['token_count']}")
+        st.write(f"**Readability (Flesch Score):** {c['readability']:.2f}")
+        st.write("**Ambiguous Phrases:**", ", ".join(c['ambiguous_phrases']) if c['ambiguous_phrases'] else "None")
+        st.write(f"**Quality Score:** {color_for_score(c['quality_score'])} {c['quality_score']} / 100")
+        st.write(f"**LLM Tip:** {c['llm_tip']}")
+
 
 # -------------------- Tab 2: AI Search Visibility Checker --------------------
 with tabs[1]:
