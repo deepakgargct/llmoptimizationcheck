@@ -172,7 +172,10 @@ with tabs[0]:
             st.success("No low-quality content.")
 
         st.subheader("📘 Glossary Terms")
-        st.table(glossary) if glossary else st.info("No glossary terms found.")
+      if glossary:
+    st.table(pd.DataFrame(glossary))
+else:
+    st.info("No glossary terms found.")
 
         st.subheader("🗂 Named Entities (Dandelion)")
         st.table(entities) if entities else st.info("No named entities found.")
