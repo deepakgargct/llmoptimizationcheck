@@ -272,14 +272,12 @@ with tabs[1]:
                 soup.find("div", class_=re.compile("ai-overview|snippet|summary", re.I))
             )
             if not summary:
-                debug_html = soup.prettify()[:2000]
-                st.info(f"Brave - No summary found. HTML snippet:\n\n{debug_html}")
                 return {
                     "Keyword": keyword,
                     "Source": "Brave",
                     "AI Overview": "No",
                     "Domain Mentioned": "No",
-                    "Summary": "-",
+                    "Summary": "No AI summary found for this query.",
                     "Visibility Score": 0
                 }
             text = summary.get_text(" ", strip=True)
@@ -312,28 +310,28 @@ with tabs[1]:
             }
             params = {
                 "q": keyword,
-                "hl": "en",  # Language
-                "gl": "us",  # Country/region (US)
+                "hl": "en",
+                "gl": "us",
             }
             url = "https://www.google.com/search"
             r = requests.get(url, headers=headers, params=params, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            # Try to find AI Overview (these selectors are best guesses and may need updating)
             aio = (
                 soup.find("div", attrs={"data-attrid": "ai_overview"}) or
                 soup.find("div", class_=re.compile("(gai-card|ai-overview|AIOverview|ifm)"))
             )
             if not aio:
                 if "consent" in r.text.lower() or "captcha" in r.text.lower():
-                    st.warning("Google has blocked the request or requires consent. Try manually or with a real browser.")
-                debug_html = soup.prettify()[:2000]
-                st.info(f"Google - No AI Overview found. HTML snippet:\n{debug_html}")
+                    st.warning("Google has blocked this request with a consent or CAPTCHA page. Please try again later or use a real browser.")
+                    summary_message = "Blocked by Google (consent or CAPTCHA required)."
+                else:
+                    summary_message = "No AI Overview found for this query."
                 return {
                     "Keyword": keyword,
                     "Source": "Google",
                     "AI Overview": "No",
                     "Domain Mentioned": "No",
-                    "Summary": "-",
+                    "Summary": summary_message,
                     "Visibility Score": 0
                 }
             text = aio.get_text(" ", strip=True)
