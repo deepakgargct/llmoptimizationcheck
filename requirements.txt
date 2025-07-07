@@ -1,10 +1,8 @@
 streamlit
 beautifulsoup4
 requests
+pandas
+matplotlib
 textstat
 nltk
 tiktoken
-pandas
-matplotlib
-spacy==3.5.3
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0.tar.gz
