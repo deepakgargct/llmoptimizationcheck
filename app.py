@@ -20,7 +20,6 @@ def ensure_spacy_model():
     try:
         return spacy.load("en_core_web_sm")
     except OSError:
-        subprocess.run(["python3", "-m", "spacy", "download", "en_core_web_sm", "--user"])
         return spacy.load("en_core_web_sm")
 
 ensure_nltk_data()
