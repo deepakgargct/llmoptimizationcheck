@@ -18,11 +18,8 @@ def ensure_nltk_data():
             nltk.download(pkg)
 
 def ensure_spacy_model():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        subprocess.run(["python3", "-m", "spacy", "download", "en_core_web_sm", "--user"])
-        return spacy.load("en_core_web_sm")
+    return spacy.blank("en")  # safe fallback for Streamlit Cloud
+
 
 ensure_nltk_data()
 nlp = ensure_spacy_model()
