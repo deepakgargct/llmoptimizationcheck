@@ -34,7 +34,6 @@ nlp = ensure_spacy_model()
 # Tokenizer
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
-# Ambiguous phrases
 AMBIGUOUS_PHRASES = {
     "click here": "Use descriptive anchor text like 'Download SEO checklist'.",
     "learn more": "Specify the subject, e.g., 'Learn more about LLM optimization'.",
@@ -111,6 +110,7 @@ def extract_chunks(soup):
             "llm_tip": generate_llm_tip(txt)
         })
     return chunks
+
 def extract_glossary(chunks):
     pat = re.compile(r"(?P<term>[A-Z][A-Za-z0-9\- ]+?)\s+(is|refers to|means|can be defined as)\s+(?P<def>.+?)\.")
     gloss = []
@@ -174,6 +174,7 @@ def color_for_score(score):
     if score >= 85: return "✅"
     elif score >= 70: return "🟡"
     else: return "🔴"
+
 # -------------------- 3. STREAMLIT UI --------------------
 st.set_page_config("LLM Optimizer", layout="wide")
 st.title("🧠 GenAI Optimization & Visibility Tool")
@@ -252,6 +253,7 @@ with tabs[0]:
                 st.markdown(f"**Ambiguous Phrases:** {', '.join(c['ambiguous_phrases']) if c['ambiguous_phrases'] else 'None'}")
                 st.markdown(f"**Quality Score:** {color_for_score(c['quality_score'])} {c['quality_score']} / 100")
                 st.markdown(f"**LLM Tip:** {c['llm_tip']}")
+
 # -------------------- Tab 2: AI Search Visibility Checker --------------------
 with tabs[1]:
     st.header("📡 AI Search Visibility Checker")
@@ -265,13 +267,11 @@ with tabs[1]:
             url = f"https://search.brave.com/search?q={keyword.replace(' ', '+')}"
             r = requests.get(url, headers=headers, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            # Try multiple possible summary containers
             summary = (
                 soup.find("div", class_="snippet-summary") or
                 soup.find("div", class_=re.compile("ai-overview|snippet|summary", re.I))
             )
             if not summary:
-                # Try to show a part of the HTML for debugging if summary not found
                 debug_html = soup.prettify()[:2000]
                 st.info(f"Brave - No summary found. HTML snippet:\n\n{debug_html}")
                 return {
@@ -304,45 +304,54 @@ with tabs[1]:
                 "Visibility Score": 0
             }
 
-    def check_perplexity_summary(keyword, domain):
+    def check_google_aio(keyword, domain):
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            url = f"https://www.perplexity.ai/search?q={keyword.replace(' ', '%20')}"
-            r = requests.get(url, headers=headers, timeout=10)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9"
+            }
+            params = {
+                "q": keyword,
+                "hl": "en",  # Language
+                "gl": "us",  # Country/region (US)
+            }
+            url = "https://www.google.com/search"
+            r = requests.get(url, headers=headers, params=params, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
-            # Try multiple possible containers
-            answers = soup.find_all("div", class_=re.compile("answer|ai-overview|snippet|summary", re.I))
-            found = False
-            for a in answers:
-                text = a.get_text(" ", strip=True)
-                if keyword.lower() in text.lower():
-                    mentioned = domain.lower() in text.lower()
-                    score = 50 + (50 if mentioned else 0)
-                    found = True
-                    return {
-                        "Keyword": keyword,
-                        "Source": "Perplexity",
-                        "AI Overview": "Yes",
-                        "Domain Mentioned": "Yes" if mentioned else "No",
-                        "Summary": text[:300] + "…" if len(text) > 300 else text,
-                        "Visibility Score": score
-                    }
-            if not found:
+            # Try to find AI Overview (these selectors are best guesses and may need updating)
+            aio = (
+                soup.find("div", attrs={"data-attrid": "ai_overview"}) or
+                soup.find("div", class_=re.compile("(gai-card|ai-overview|AIOverview|ifm)"))
+            )
+            if not aio:
+                if "consent" in r.text.lower() or "captcha" in r.text.lower():
+                    st.warning("Google has blocked the request or requires consent. Try manually or with a real browser.")
                 debug_html = soup.prettify()[:2000]
-                st.info(f"Perplexity - No summary found. HTML snippet:\n\n{debug_html}")
+                st.info(f"Google - No AI Overview found. HTML snippet:\n{debug_html}")
+                return {
+                    "Keyword": keyword,
+                    "Source": "Google",
+                    "AI Overview": "No",
+                    "Domain Mentioned": "No",
+                    "Summary": "-",
+                    "Visibility Score": 0
+                }
+            text = aio.get_text(" ", strip=True)
+            mentioned = domain.lower() in text.lower()
+            score = 50 + (50 if mentioned else 0)
             return {
                 "Keyword": keyword,
-                "Source": "Perplexity",
-                "AI Overview": "No",
-                "Domain Mentioned": "No",
-                "Summary": "-",
-                "Visibility Score": 0
+                "Source": "Google",
+                "AI Overview": "Yes",
+                "Domain Mentioned": "Yes" if mentioned else "No",
+                "Summary": text,
+                "Visibility Score": score
             }
         except Exception as e:
-            st.error(f"Perplexity error for '{keyword}': {e}")
+            st.error(f"Google error for '{keyword}': {e}")
             return {
                 "Keyword": keyword,
-                "Source": "Perplexity",
+                "Source": "Google",
                 "AI Overview": "Error",
                 "Domain Mentioned": "-",
                 "Summary": f"Error: {str(e)}",
@@ -350,13 +359,13 @@ with tabs[1]:
             }
 
     if st.button("Check AI Visibility") and keyword_input and domain_input:
-        with st.spinner("Checking visibility across Brave and Perplexity..."):
+        with st.spinner("Checking visibility across Brave and Google..."):
             keywords = [k.strip() for k in keyword_input.splitlines() if k.strip()]
             results = []
 
             for kw in keywords:
                 results.append(check_brave_summary(kw, domain_input))
-                results.append(check_perplexity_summary(kw, domain_input))
+                results.append(check_google_aio(kw, domain_input))
 
             df = pd.DataFrame(results)
 
